@@ -1,0 +1,23 @@
+{
+  "scenario": "clustered",
+  "topology": "clustered",
+  "steps": 100000,
+  "alpha": 0.2,
+  "spread": 0.01,
+  "min_profit": 0.05,
+  "seed": 1,
+  "summary": {
+    "InitialPriceSpread": 0.8,
+    "FinalPriceSpread": 0.7500000000000002,
+    "InitialMeanPrice": 0.5,
+    "FinalMeanPrice": 0.5,
+    "TotalTrades": 1,
+    "AverageTradesPerStep": 0.00001,
+    "FinalLiquidityScore": 0,
+    "PriceSpreadDecreased": true,
+    "Converged": false,
+    "Fragmented": true,
+    "Collapsed": false,
+    "Liquid": false
+  }
+}

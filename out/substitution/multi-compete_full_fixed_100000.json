@@ -1,0 +1,34 @@
+{
+  "scenario": "multi-compete",
+  "topology": "full",
+  "assets": [
+    "SKUG",
+    "WEB4"
+  ],
+  "steps": 100000,
+  "alpha": 0.2,
+  "spread": 0.01,
+  "seed": 1,
+  "enable_substitution": true,
+  "utility_mode": "fixed",
+  "summary": {
+    "FinalAssetMeans": {
+      "SKUG": 0.3599070151354045,
+      "WEB4": 0.01563024155420742
+    },
+    "FinalAssetSpreads": {
+      "SKUG": 0.050941181267991575,
+      "WEB4": 0.003316086966667119
+    },
+    "FinalAssetShares": {
+      "SKUG": 0.49977806532320046,
+      "WEB4": 0.5002219346767995
+    },
+    "DominantAsset": "WEB4",
+    "TotalTrades": 999159,
+    "TotalCrossAssetTrades": 1,
+    "TotalSwitchCount": 1,
+    "TotalVolume": 20014.317984404042,
+    "ExampleExchangeRate": 23.176598667546443
+  }
+}

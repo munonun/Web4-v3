@@ -1,0 +1,23 @@
+{
+  "scenario": "split",
+  "topology": "full",
+  "steps": 100000,
+  "alpha": 0.2,
+  "spread": 0.01,
+  "min_profit": 0.05,
+  "seed": 1,
+  "summary": {
+    "InitialPriceSpread": 1,
+    "FinalPriceSpread": 2.7755575615628914e-16,
+    "InitialMeanPrice": 0.5,
+    "FinalMeanPrice": 0.49999999999999994,
+    "TotalTrades": 20,
+    "AverageTradesPerStep": 0.0002,
+    "FinalLiquidityScore": 0,
+    "PriceSpreadDecreased": true,
+    "Converged": true,
+    "Fragmented": false,
+    "Collapsed": false,
+    "Liquid": false
+  }
+}

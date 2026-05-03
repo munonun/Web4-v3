@@ -1,0 +1,24 @@
+Web4 multi-asset market simulation
+scenario: multi-flight
+topology: full
+assets: SKUG,WEB4
+steps: 100000
+alpha: 0.20
+spread: 0.01
+
+enable_substitution: true
+utility_mode: fixed
+
+final:
+SKUG_mean: 0.02
+SKUG_spread: 0.00
+SKUG_share: 0.50
+WEB4_mean: 0.36
+WEB4_spread: 0.05
+WEB4_share: 0.50
+dominant_asset: WEB4
+switch_count: 287
+total_trades: 999345
+total_cross_asset_trades: 287
+total_volume: 20362.03
+SKUG_WEB4_rate: 0.0462

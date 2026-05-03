@@ -1,0 +1,34 @@
+{
+  "scenario": "multi-flight",
+  "topology": "full",
+  "assets": [
+    "SKUG",
+    "WEB4"
+  ],
+  "steps": 100000,
+  "alpha": 0.2,
+  "spread": 0.01,
+  "seed": 1,
+  "enable_substitution": true,
+  "utility_mode": "fixed",
+  "summary": {
+    "FinalAssetMeans": {
+      "SKUG": 0.01653463577740571,
+      "WEB4": 0.35934529648177493
+    },
+    "FinalAssetSpreads": {
+      "SKUG": 0.0033339480525413634,
+      "WEB4": 0.05092816004681622
+    },
+    "FinalAssetShares": {
+      "SKUG": 0.499806306722634,
+      "WEB4": 0.5001936932773661
+    },
+    "DominantAsset": "WEB4",
+    "TotalTrades": 999345,
+    "TotalCrossAssetTrades": 287,
+    "TotalSwitchCount": 287,
+    "TotalVolume": 20362.025458286793,
+    "ExampleExchangeRate": 0.0462046656081681
+  }
+}

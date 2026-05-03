@@ -1,0 +1,34 @@
+{
+  "scenario": "multi-fragmented",
+  "topology": "clustered",
+  "assets": [
+    "SKUG",
+    "WEB4"
+  ],
+  "steps": 100000,
+  "alpha": 0.2,
+  "spread": 0.01,
+  "seed": 1,
+  "enable_substitution": true,
+  "utility_mode": "clustered",
+  "summary": {
+    "FinalAssetMeans": {
+      "SKUG": 0.5989906967595188,
+      "WEB4": 0.5029064283763216
+    },
+    "FinalAssetSpreads": {
+      "SKUG": 0.8312350012719505,
+      "WEB4": 0.9957993222611038
+    },
+    "FinalAssetShares": {
+      "SKUG": 0.5000071398969104,
+      "WEB4": 0.49999286010308974
+    },
+    "DominantAsset": "SKUG",
+    "TotalTrades": 199919,
+    "TotalCrossAssetTrades": 1,
+    "TotalSwitchCount": 1,
+    "TotalVolume": 4001.2880518930633,
+    "ExampleExchangeRate": 19.70379177817055
+  }
+}
