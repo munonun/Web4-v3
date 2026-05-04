@@ -341,3 +341,170 @@ Without:
 An economy is not built on debt.
 It is built on flow.
 ```
+
+---
+
+# Price Formation Pipeline
+
+## Overview
+
+Web4 prices are not directly computed from rules.
+
+Rules only provide the initial seed.
+Real price emerges from flow.
+
+```text
+Features → Seed
+Flow → Price
+Decay → Validation
+```
+
+---
+
+## Step 0 — Features
+
+Each asset may expose observable features:
+
+```text
+cost      = verified resource usage
+age       = survival time
+stability = inverse of recent price volatility
+```
+
+These features do not define the final price.
+
+They only provide early trust signals before enough market flow exists.
+
+---
+
+## Step 1 — Score Calculation
+
+A local score is computed from asset features:
+
+```text
+score =
+  w_cost * S_cost
++ w_age * S_age
++ w_stability * S_stability
+```
+
+The score is used for:
+
+* filtering weak assets
+* initializing seed price
+* weighting early market observations
+
+The score must not replace real market flow.
+
+---
+
+## Step 2 — Seed Price
+
+Before real trades exist, an asset needs a starting price.
+
+```text
+price_initial = base_price × score
+```
+
+This solves the cold-start problem:
+
+```text
+No trades → No price → No trades
+```
+
+The seed price is only a temporary starting point.
+
+---
+
+## Step 3 — Flow
+
+Users execute real trades.
+
+This is the core of Web4 pricing.
+
+```text
+trade price + volume + trust weight → market signal
+```
+
+Flow represents actual demand and supply.
+
+---
+
+## Step 4 — Market Price
+
+Once trades exist, price is formed from weighted volume.
+
+```text
+price_market =
+Σ(p_i × q_i × s_i) / Σ(q_i × s_i)
+```
+
+Where:
+
+```text
+p_i = trade price
+q_i = trade volume
+s_i = score / trust weight
+```
+
+The score does not set the price.
+
+It only weights how strongly a trade contributes to price discovery.
+
+---
+
+## Step 5 — Decay
+
+If an asset is not used, its price weakens over time.
+
+```text
+if no recent trades:
+    price = price × exp(-k × Δt)
+```
+
+This removes dead assets naturally.
+
+Unused assets lose market relevance without requiring global rejection.
+
+---
+
+## Final Price Model
+
+The final price blends seed price and market price:
+
+```text
+price =
+  (1 - λ) × price_initial
++ λ × price_market
+```
+
+Where:
+
+```text
+λ = min(1, settled_volume / V_threshold)
+```
+
+As real volume grows, λ approaches 1.
+
+That means:
+
+```text
+low volume  → seed price matters
+high volume → market price dominates
+```
+
+---
+
+## Core Principle
+
+```text
+Features bootstrap price.
+Flow discovers price.
+Decay removes unused price.
+```
+
+---
+
+## One-Line Summary
+
+> Price is seeded by features, discovered by flow, and weakened by inactivity.

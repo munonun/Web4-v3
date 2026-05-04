@@ -4,9 +4,17 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+
+	modelcore "web4-v3/core/model"
+	pricecore "web4-v3/core/price"
 )
 
 const MarketAssetID = "market-asset"
+
+const (
+	PriceModelAcceptance = "acceptance"
+	PriceModelPipeline   = "pipeline"
+)
 
 type MarketConfig struct {
 	Scenario           string
@@ -22,6 +30,7 @@ type MarketConfig struct {
 	EnableCycle        bool
 	EnableSubstitution bool
 	UtilityMode        string
+	PriceModel         string
 	ConsumptionRate    float64
 	ProductionRate     float64
 }
@@ -82,14 +91,15 @@ type MarketResult struct {
 
 func DefaultMarketConfig() MarketConfig {
 	return MarketConfig{
-		Scenario:  "split",
-		Topology:  "full",
-		Steps:     1000,
-		Alpha:     0.2,
-		Spread:    0.01,
-		MinProfit: 0.05,
-		Seed:      1,
-		MaxQty:    1,
+		Scenario:   "split",
+		Topology:   "full",
+		Steps:      1000,
+		Alpha:      0.2,
+		Spread:     0.01,
+		MinProfit:  0.05,
+		Seed:       1,
+		MaxQty:     1,
+		PriceModel: PriceModelAcceptance,
 	}
 }
 
@@ -122,7 +132,10 @@ func RunMarketSimulation(cfg MarketConfig) (MarketResult, error) {
 	totalVolume := 0.0
 	totalProduced := 0.0
 	totalConsumed := 0.0
-	metrics = append(metrics, MarketMetrics(0, current, currentInventory, demand, nil, 0, 0, 0, 0, 0, 0, clusters))
+	tradeObservations := []pricecore.TradeObservation{}
+	settledVolume := modelcore.Amount(0)
+	lastTradeStep := 0
+	metrics = append(metrics, MarketMetrics(0, current, currentInventory, demand, nil, 0, 0, 0, 0, 0, 0, clusters, marketPriceTable(cfg.PriceModel, MarketAssetID, current, tradeObservations, settledVolume, lastTradeStep, 0)))
 
 	for step := 1; step <= cfg.Steps; step++ {
 		demandTrades := 0
@@ -137,7 +150,7 @@ func RunMarketSimulation(cfg MarketConfig) (MarketResult, error) {
 			nextInventory, producedVolume = production.ApplyWithVolume(nextInventory)
 			next = StepDemandPricePressure(next, nextInventory, demand, cfg.Alpha)
 		}
-		pt := PriceTableFromAcceptance(MarketAssetID, next)
+		pt := marketPriceTable(cfg.PriceModel, MarketAssetID, next, tradeObservations, settledVolume, lastTradeStep, step)
 		arbitrage := FindArbitrage(pt, MarketAssetID, cfg.MinProfit)
 		if cfg.EnableDemand {
 			for _, sellerID := range nodeIDs {
@@ -155,6 +168,17 @@ func RunMarketSimulation(cfg MarketConfig) (MarketResult, error) {
 					nextInventory, next = ApplyDemandTrade(nextInventory, next, quote, cfg.Alpha)
 					demandTrades++
 					stepVolume += quote.Quantity
+					volume := modelcore.FromFloat(quote.Quantity)
+					if volume > 0 {
+						tradeObservations = append(tradeObservations, pricecore.TradeObservation{
+							Price:    quote.ClearingPrice,
+							Volume:   volume,
+							Weight:   tradeObservationWeight(next, quote.Seller, quote.Buyer),
+							TimeUnix: int64(step),
+						})
+						settledVolume = modelcore.Add(settledVolume, volume)
+						lastTradeStep = step
+					}
 				}
 			}
 		}
@@ -171,6 +195,15 @@ func RunMarketSimulation(cfg MarketConfig) (MarketResult, error) {
 			}
 			next = ApplyTradeFeedback(next, quote, cfg.Alpha)
 			arbitrageTrades++
+			volume := modelcore.FromFloat(1)
+			tradeObservations = append(tradeObservations, pricecore.TradeObservation{
+				Price:    quote.ClearingPrice,
+				Volume:   volume,
+				Weight:   tradeObservationWeight(next, quote.Seller, quote.Buyer),
+				TimeUnix: int64(step),
+			})
+			settledVolume = modelcore.Add(settledVolume, volume)
+			lastTradeStep = step
 		}
 		next = StepMarketTopology(next, topology, cfg.Alpha)
 		current = next
@@ -182,7 +215,7 @@ func RunMarketSimulation(cfg MarketConfig) (MarketResult, error) {
 		totalVolume += stepVolume
 		totalProduced += producedVolume
 		totalConsumed += consumedVolume
-		metrics = append(metrics, MarketMetrics(step, current, currentInventory, demand, arbitrage, executed, demandTrades, arbitrageTrades, stepVolume, producedVolume, consumedVolume, clusters))
+		metrics = append(metrics, MarketMetrics(step, current, currentInventory, demand, arbitrage, executed, demandTrades, arbitrageTrades, stepVolume, producedVolume, consumedVolume, clusters, marketPriceTable(cfg.PriceModel, MarketAssetID, current, tradeObservations, settledVolume, lastTradeStep, step)))
 	}
 
 	summary := MarketSummaryFromMetrics(metrics, totalTrades, totalDemandTrades, totalArbitrageTrades, totalVolume, totalProduced, totalConsumed, len(nodeIDs), cfg.Steps)
@@ -376,6 +409,51 @@ func StepDemandPricePressure(state AcceptanceState, inventory InventoryState, de
 	return next
 }
 
+func marketPriceTable(
+	priceModel string,
+	assetID string,
+	state AcceptanceState,
+	trades []pricecore.TradeObservation,
+	settledVolume modelcore.Amount,
+	lastTradeStep int,
+	step int,
+) PriceTable {
+	if priceModel == "" || priceModel == PriceModelAcceptance {
+		return PriceTableFromAcceptance(assetID, state)
+	}
+
+	pt := NewPriceTable()
+	mean := AcceptanceMean(state)
+	age := clamp01(float64(step) / 1000.0)
+	cfg := pricecore.PriceConfig{
+		BasePrice:       1,
+		Weights:         pricecore.FeatureWeights{Cost: 1, Age: 0.25, Stability: 0.25},
+		VolumeThreshold: modelcore.FromFloat(10),
+		DecayK:          0.001,
+	}
+	for _, nodeID := range stateNodeIDs(state) {
+		score := clamp01(state.Scores[nodeID])
+		features := pricecore.AssetFeatures{
+			Cost:      score,
+			Age:       age,
+			Stability: 1 - math.Abs(score-mean),
+		}
+		result := pricecore.ComputePrice(features, trades, settledVolume, int64(lastTradeStep), int64(step), cfg)
+		pt.Set(nodeID, assetID, result.FinalPrice)
+	}
+	return pt
+}
+
+func tradeObservationWeight(state AcceptanceState, a string, b string) float64 {
+	scoreA := clamp01(state.Scores[a])
+	scoreB := clamp01(state.Scores[b])
+	weight := (scoreA + scoreB) / 2
+	if weight <= 0 {
+		return 1
+	}
+	return weight
+}
+
 func MarketMetrics(
 	step int,
 	state AcceptanceState,
@@ -389,8 +467,8 @@ func MarketMetrics(
 	producedVolume float64,
 	consumedVolume float64,
 	clusters [][]string,
+	pt PriceTable,
 ) MarketStepMetrics {
-	pt := PriceTableFromAcceptance(MarketAssetID, state)
 	nodeIDs := stateNodeIDs(state)
 	metrics := MarketStepMetrics{
 		Step:                    step,
@@ -531,6 +609,11 @@ func ValidateMarketConfig(cfg MarketConfig) error {
 	}
 	if cfg.ProductionRate < 0 {
 		return fmt.Errorf("production-rate must be >= 0")
+	}
+	switch cfg.PriceModel {
+	case "", PriceModelAcceptance, PriceModelPipeline:
+	default:
+		return fmt.Errorf("unknown price model %q", cfg.PriceModel)
 	}
 
 	return nil

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bytes"
 	"fmt"
 
 	"web4-v3/core/crypto"
@@ -20,10 +19,14 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 	if err != nil {
 		return nil, err
 	}
+	authorID, err := NodeIDFromPublicKey(author)
+	if err != nil {
+		return nil, err
+	}
 
 	maxDepth := uint32(0)
 	for i, input := range inputs {
-		if !bytes.Equal(input.Owner, author) {
+		if input.Owner != authorID {
 			return nil, fmt.Errorf("input %d is not owned by author", i)
 		}
 		if input.Depth > maxDepth {
@@ -55,7 +58,7 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 	tx := TransferTx{
 		Inputs:  txInputs,
 		Outputs: normalizedOutputs,
-		Author:  author,
+		Author:  authorID,
 	}
 
 	txID, err := TransferTxID(tx)

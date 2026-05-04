@@ -16,7 +16,7 @@ import (
 
 const usage = `usage:
   web4 sim acceptance [--scenario partial|unanimous|collapse|split] [--alpha n] [--tau n] [--steps n] [--epsilon n] [--topology global|full|chain|clustered] [--no-self] [--json]
-  web4 sim market [--scenario split|clustered|random|collapse|high-liquidity|fragmented|demand-basic|demand-fragmented|demand-random|cycle-basic|cycle-fragmented|cycle-random|multi-basic|multi-compete|multi-fragmented|multi-flight|multi-coexist] [--topology full|chain|clustered] [--steps n] [--alpha n] [--spread n] [--min-profit n] [--seed n] [--trades-per-step n] [--enable-demand] [--max-qty n] [--enable-cycle] [--consumption-rate n] [--production-rate n] [--multi-asset] [--assets SKUG,WEB4] [--enable-substitution] [--utility-mode fixed|random|clustered] [--json] [--json-steps] [--csv path]
+  web4 sim market [--scenario split|clustered|random|collapse|high-liquidity|fragmented|demand-basic|demand-fragmented|demand-random|cycle-basic|cycle-fragmented|cycle-random|multi-basic|multi-compete|multi-fragmented|multi-flight|multi-coexist] [--topology full|chain|clustered] [--steps n] [--alpha n] [--spread n] [--min-profit n] [--seed n] [--trades-per-step n] [--enable-demand] [--max-qty n] [--enable-cycle] [--consumption-rate n] [--production-rate n] [--price-model acceptance|pipeline] [--multi-asset] [--assets SKUG,WEB4] [--enable-substitution] [--utility-mode fixed|random|clustered] [--json] [--json-steps] [--csv path]
 `
 
 type acceptanceOptions struct {
@@ -75,6 +75,7 @@ type marketJSONOutput struct {
 	EnableCycle     bool                    `json:"enable_cycle"`
 	ConsumptionRate float64                 `json:"consumption_rate"`
 	ProductionRate  float64                 `json:"production_rate"`
+	PriceModel      string                  `json:"price_model"`
 	Summary         sim.MarketSummary       `json:"summary"`
 	Metrics         []sim.MarketStepMetrics `json:"metrics,omitempty"`
 }
@@ -192,6 +193,7 @@ func parseMarketOptions(args []string) (marketOptions, error) {
 	fs.BoolVar(&opts.Config.EnableCycle, "enable-cycle", false, "enable recurring consumption and simulation-only production")
 	fs.Float64Var(&opts.Config.ConsumptionRate, "consumption-rate", opts.Config.ConsumptionRate, "quantity consumed per consumer per step")
 	fs.Float64Var(&opts.Config.ProductionRate, "production-rate", opts.Config.ProductionRate, "quantity produced per producer per step")
+	fs.StringVar(&opts.Config.PriceModel, "price-model", opts.Config.PriceModel, "price model: acceptance, pipeline")
 	fs.BoolVar(&opts.MultiAsset, "multi-asset", false, "run multi-asset market simulation")
 	fs.StringVar(&opts.Assets, "assets", "SKUG,WEB4", "comma-separated asset IDs for multi-asset simulation")
 	fs.BoolVar(&opts.Config.EnableSubstitution, "enable-substitution", false, "enable portfolio preferences and substitution utility")
@@ -208,6 +210,9 @@ func parseMarketOptions(args []string) (marketOptions, error) {
 	}
 
 	if opts.MultiAsset {
+		if opts.Config.PriceModel != "" && opts.Config.PriceModel != sim.PriceModelAcceptance {
+			return marketOptions{}, fmt.Errorf("price-model %q is only implemented for single-asset market simulations", opts.Config.PriceModel)
+		}
 		cfg := sim.DefaultMultiMarketConfig()
 		cfg.Scenario = opts.Config.Scenario
 		cfg.Topology = opts.Config.Topology
@@ -409,7 +414,8 @@ func writeMarketText(w io.Writer, result sim.MarketResult) {
 	fmt.Fprintf(w, "max_qty: %.2f\n", cfg.MaxQty)
 	fmt.Fprintf(w, "enable_cycle: %t\n", cfg.EnableCycle)
 	fmt.Fprintf(w, "consumption_rate: %.2f\n", cfg.ConsumptionRate)
-	fmt.Fprintf(w, "production_rate: %.2f\n\n", cfg.ProductionRate)
+	fmt.Fprintf(w, "production_rate: %.2f\n", cfg.ProductionRate)
+	fmt.Fprintf(w, "price_model: %s\n\n", cfg.PriceModel)
 
 	fmt.Fprintln(w, "initial:")
 	fmt.Fprintf(w, "mean_price: %.2f\n", summary.InitialMeanPrice)
@@ -451,6 +457,7 @@ func writeMarketJSON(w io.Writer, result sim.MarketResult, includeSteps bool) er
 		EnableCycle:     result.Config.EnableCycle,
 		ConsumptionRate: result.Config.ConsumptionRate,
 		ProductionRate:  result.Config.ProductionRate,
+		PriceModel:      result.Config.PriceModel,
 		Summary:         result.Summary,
 	}
 	if includeSteps {

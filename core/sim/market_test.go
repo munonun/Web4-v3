@@ -292,6 +292,12 @@ func TestValidateMarketConfigRejectsInvalidValues(t *testing.T) {
 	if err := ValidateMarketConfig(cfg); err == nil {
 		t.Fatal("expected invalid alpha error")
 	}
+
+	cfg = DefaultMarketConfig()
+	cfg.PriceModel = "missing"
+	if err := ValidateMarketConfig(cfg); err == nil {
+		t.Fatal("expected invalid price model error")
+	}
 }
 
 func TestStepMarketTopologyDoesNotMutateInput(t *testing.T) {

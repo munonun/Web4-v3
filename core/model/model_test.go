@@ -143,13 +143,13 @@ func TestTxIDsStableAndSignatureIndependent(t *testing.T) {
 	}
 }
 
-func mustIssue(t *testing.T, amount uint64, expiryUnix int64) (*IssueTx, Value) {
+func mustIssue(t *testing.T, amount Amount, expiryUnix int64) (*IssueTx, Value) {
 	t.Helper()
 	tx, output, _ := mustIssueToOwner(t, amount, expiryUnix)
 	return tx, output
 }
 
-func mustIssueToOwner(t *testing.T, amount uint64, expiryUnix int64) (*IssueTx, Value, crypto.PrivateKey) {
+func mustIssueToOwner(t *testing.T, amount Amount, expiryUnix int64) (*IssueTx, Value, crypto.PrivateKey) {
 	t.Helper()
 	_, issuerPriv, err := crypto.GenerateKeypair()
 	if err != nil {
@@ -176,7 +176,7 @@ func mustTransfer(t *testing.T, authorPriv crypto.PrivateKey, inputs []Value, ou
 	return tx
 }
 
-func transferOutput(input Value, owner crypto.PublicKey, amount uint64) Value {
+func transferOutput(input Value, owner NodeID, amount Amount) Value {
 	return Value{
 		Amount:     amount,
 		Unit:       input.Unit,

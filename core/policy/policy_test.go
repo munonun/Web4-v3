@@ -99,7 +99,7 @@ func trustedPolicy(issuer crypto.PublicKey, now int64) Policy {
 	}
 }
 
-func mustPolicyIssue(t *testing.T, amount uint64, expiryUnix int64) (*model.IssueTx, model.Value, crypto.PublicKey, crypto.PrivateKey) {
+func mustPolicyIssue(t *testing.T, amount model.Amount, expiryUnix int64) (*model.IssueTx, model.Value, crypto.PublicKey, crypto.PrivateKey) {
 	t.Helper()
 	issuerPub, issuerPriv, err := crypto.GenerateKeypair()
 	if err != nil {
@@ -116,7 +116,7 @@ func mustPolicyIssue(t *testing.T, amount uint64, expiryUnix int64) (*model.Issu
 	return tx, output, issuerPub, ownerPriv
 }
 
-func mustPolicyTransfer(t *testing.T, ownerPriv crypto.PrivateKey, input model.Value, amount uint64) *model.TransferTx {
+func mustPolicyTransfer(t *testing.T, ownerPriv crypto.PrivateKey, input model.Value, amount model.Amount) *model.TransferTx {
 	t.Helper()
 	output := model.Value{
 		Amount:     amount,

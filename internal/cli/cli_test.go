@@ -145,6 +145,18 @@ func TestCLIMarketRuns(t *testing.T) {
 	}
 }
 
+func TestCLIMarketPipelinePriceModelRuns(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sim", "market", "--scenario", "cycle-basic", "--topology", "full", "--steps", "5", "--enable-demand", "--enable-cycle", "--price-model", "pipeline"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "price_model: pipeline") {
+		t.Fatalf("unexpected output: %s", stdout.String())
+	}
+}
+
 func TestCLIMarketCSVOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	path := filepath.Join(t.TempDir(), "market.csv")

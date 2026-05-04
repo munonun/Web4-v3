@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 
@@ -16,11 +15,11 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 	if tx.UnitName == "" {
 		return fmt.Errorf("unit name is required")
 	}
-	if tx.Amount == 0 {
+	if !validAmount(tx.Amount) {
 		return fmt.Errorf("amount must be greater than zero")
 	}
 
-	unit, err := NewUnitID(tx.Issuer, tx.UnitName)
+	unit, err := NewUnitID(tx.Issuer.PublicKey(), tx.UnitName)
 	if err != nil {
 		return err
 	}
@@ -40,12 +39,21 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 	if err != nil {
 		return err
 	}
-	if !crypto.Verify(tx.Issuer, preimage, tx.Signature) {
+	if !crypto.Verify(tx.Issuer.PublicKey(), preimage, tx.Signature) {
 		return fmt.Errorf("invalid issue signature")
 	}
 
-	if output.Amount != tx.Amount || !sameHash(output.Unit, tx.Unit) || !bytes.Equal(output.Owner, tx.Owner) || !bytes.Equal(output.Issuer, tx.Issuer) || output.ExpiryUnix != tx.ExpiryUnix || output.Depth != 0 {
+	if output.Amount != tx.Amount || !sameHash(output.Unit, tx.Unit) || output.Owner != tx.Owner || output.Issuer != tx.Issuer || output.ExpiryUnix != tx.ExpiryUnix || output.Depth != 0 {
 		return fmt.Errorf("output does not match issue tx")
+	}
+	if len(tx.Outputs) > 0 {
+		if len(tx.Outputs) != 1 {
+			return fmt.Errorf("legacy issue tx must have one output")
+		}
+		txOutput := tx.Outputs[0]
+		if !sameHash(txOutput.ID, output.ID) || txOutput.Amount != output.Amount || !sameHash(txOutput.Unit, output.Unit) || txOutput.Owner != output.Owner {
+			return fmt.Errorf("issue tx output mismatch")
+		}
 	}
 
 	expectedValueID, err := ValueIDFor(output)
@@ -79,7 +87,7 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 		if !sameHash(tx.Inputs[i], input.ID) {
 			return fmt.Errorf("input %d id mismatch", i)
 		}
-		if !bytes.Equal(input.Owner, tx.Author) {
+		if input.Owner != tx.Author {
 			return fmt.Errorf("input %d is not owned by author", i)
 		}
 		if input.Depth > maxDepth {
@@ -92,7 +100,7 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 	}
 	expectedDepth := maxDepth + 1
 	for i, output := range tx.Outputs {
-		if output.Amount == 0 {
+		if !validAmount(output.Amount) {
 			return fmt.Errorf("output %d amount must be greater than zero", i)
 		}
 		if output.Depth != expectedDepth {
@@ -123,7 +131,7 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 	if err != nil {
 		return err
 	}
-	if !crypto.Verify(tx.Author, preimage, tx.Signature) {
+	if !crypto.Verify(tx.Author.PublicKey(), preimage, tx.Signature) {
 		return fmt.Errorf("invalid transfer signature")
 	}
 
@@ -131,44 +139,47 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 }
 
 type unitBalance struct {
-	amount uint64
-	issuer crypto.PublicKey
+	amount Amount
+	issuer NodeID
+	set    bool
 }
 
 func checkConservation(inputs []Value, outputs []Value) error {
 	balances := make(map[UnitID]unitBalance)
 
 	for i, input := range inputs {
-		if input.Amount == 0 {
+		if !validAmount(input.Amount) {
 			return fmt.Errorf("input %d amount must be greater than zero", i)
 		}
 		balance := balances[input.Unit]
-		if balance.issuer != nil && !bytes.Equal(balance.issuer, input.Issuer) {
+		if balance.set && balance.issuer != input.Issuer {
 			return fmt.Errorf("input %d issuer mismatch for unit", i)
 		}
-		if math.MaxUint64-balance.amount < input.Amount {
-			return fmt.Errorf("input amount overflow")
-		}
-		balance.amount += input.Amount
+		balance.amount = Add(balance.amount, input.Amount)
 		balance.issuer = input.Issuer
+		balance.set = true
 		balances[input.Unit] = balance
 	}
 
 	for i, output := range outputs {
-		if output.Amount == 0 {
+		if !validAmount(output.Amount) {
 			return fmt.Errorf("output %d amount must be greater than zero", i)
 		}
 		balance, ok := balances[output.Unit]
 		if !ok {
 			return fmt.Errorf("output %d uses unknown unit", i)
 		}
-		if !bytes.Equal(balance.issuer, output.Issuer) {
+		if balance.issuer != output.Issuer {
 			return fmt.Errorf("output %d issuer mismatch for unit", i)
 		}
 		if balance.amount < output.Amount {
 			return fmt.Errorf("output amount exceeds inputs for unit")
 		}
-		balance.amount -= output.Amount
+		next, err := Sub(balance.amount, output.Amount)
+		if err != nil {
+			return fmt.Errorf("output amount exceeds inputs for unit")
+		}
+		balance.amount = next
 		balances[output.Unit] = balance
 	}
 

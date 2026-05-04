@@ -7,15 +7,23 @@ import (
 )
 
 // NewIssueTx creates and signs a minimal issuance transaction and its output value.
-func NewIssueTx(issuerPriv crypto.PrivateKey, owner crypto.PublicKey, unitName string, amount uint64, expiryUnix int64) (*IssueTx, Value, error) {
+func NewIssueTx(issuerPriv crypto.PrivateKey, owner crypto.PublicKey, unitName string, amount Amount, expiryUnix int64) (*IssueTx, Value, error) {
 	if unitName == "" {
 		return nil, Value{}, fmt.Errorf("unit name is required")
 	}
-	if amount == 0 {
+	if !validAmount(amount) {
 		return nil, Value{}, fmt.Errorf("amount must be greater than zero")
 	}
 
 	issuer, err := publicKeyFromPrivate(issuerPriv)
+	if err != nil {
+		return nil, Value{}, err
+	}
+	issuerID, err := NodeIDFromPublicKey(issuer)
+	if err != nil {
+		return nil, Value{}, err
+	}
+	ownerID, err := NodeIDFromPublicKey(owner)
 	if err != nil {
 		return nil, Value{}, err
 	}
@@ -29,10 +37,25 @@ func NewIssueTx(issuerPriv crypto.PrivateKey, owner crypto.PublicKey, unitName s
 		UnitName:   unitName,
 		Unit:       unit,
 		Amount:     amount,
-		Issuer:     issuer,
-		Owner:      owner,
+		Issuer:     issuerID,
+		Owner:      ownerID,
 		ExpiryUnix: expiryUnix,
 	}
+
+	output := Value{
+		Amount:     amount,
+		Unit:       unit,
+		Owner:      ownerID,
+		Issuer:     issuerID,
+		ExpiryUnix: expiryUnix,
+		Depth:      0,
+	}
+	valueID, err := ValueIDFor(output)
+	if err != nil {
+		return nil, Value{}, err
+	}
+	output.ID = valueID
+	tx.Outputs = []Value{output}
 
 	txID, err := IssueTxID(tx)
 	if err != nil {
@@ -49,20 +72,6 @@ func NewIssueTx(issuerPriv crypto.PrivateKey, owner crypto.PublicKey, unitName s
 		return nil, Value{}, err
 	}
 	tx.Signature = sig
-
-	output := Value{
-		Amount:     amount,
-		Unit:       unit,
-		Owner:      owner,
-		Issuer:     issuer,
-		ExpiryUnix: expiryUnix,
-		Depth:      0,
-	}
-	valueID, err := ValueIDFor(output)
-	if err != nil {
-		return nil, Value{}, err
-	}
-	output.ID = valueID
 
 	return &tx, output, nil
 }

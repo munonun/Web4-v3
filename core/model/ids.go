@@ -53,15 +53,36 @@ func TransferTxID(tx TransferTx) (TxID, error) {
 	return TxID(crypto.HashBytes(preimage)), nil
 }
 
+// TradeTxID returns the deterministic ID for an atomic bilateral exchange.
+func TradeTxID(tx TradeTx) (TxID, error) {
+	preimage, err := tradePreimage(tx)
+	if err != nil {
+		return TxID{}, err
+	}
+
+	return TxID(crypto.HashBytes(preimage)), nil
+}
+
 func issuePreimage(tx IssueTx) ([]byte, error) {
+	outputs := make([][]byte, len(tx.Outputs))
+	for i, output := range tx.Outputs {
+		preimage, err := valuePreimage(output)
+		if err != nil {
+			return nil, fmt.Errorf("output %d: %w", i, err)
+		}
+		outputs[i] = preimage
+	}
+
 	return canonical.EncodeFields(
 		canonical.Field{Name: "kind", Value: "issue_tx"},
 		canonical.Field{Name: "unit_name", Value: tx.UnitName},
 		canonical.Field{Name: "unit", Value: hashBytes(tx.Unit)},
 		canonical.Field{Name: "amount", Value: tx.Amount},
-		canonical.Field{Name: "issuer", Value: []byte(tx.Issuer)},
-		canonical.Field{Name: "owner", Value: []byte(tx.Owner)},
+		canonical.Field{Name: "outputs", Value: outputs},
+		canonical.Field{Name: "issuer", Value: tx.Issuer.Bytes()},
+		canonical.Field{Name: "owner", Value: tx.Owner.Bytes()},
 		canonical.Field{Name: "expiry_unix", Value: tx.ExpiryUnix},
+		canonical.Field{Name: "timestamp", Value: tx.Timestamp},
 	)
 }
 
@@ -70,8 +91,9 @@ func valuePreimage(value Value) ([]byte, error) {
 		canonical.Field{Name: "kind", Value: "value"},
 		canonical.Field{Name: "amount", Value: value.Amount},
 		canonical.Field{Name: "unit", Value: hashBytes(value.Unit)},
-		canonical.Field{Name: "owner", Value: []byte(value.Owner)},
-		canonical.Field{Name: "issuer", Value: []byte(value.Issuer)},
+		canonical.Field{Name: "owner", Value: value.Owner.Bytes()},
+		canonical.Field{Name: "created_at", Value: value.CreatedAt},
+		canonical.Field{Name: "issuer", Value: value.Issuer.Bytes()},
 		canonical.Field{Name: "expiry_unix", Value: value.ExpiryUnix},
 		canonical.Field{Name: "depth", Value: uint64(value.Depth)},
 	)
@@ -96,8 +118,50 @@ func transferPreimage(tx TransferTx) ([]byte, error) {
 		canonical.Field{Name: "kind", Value: "transfer_tx"},
 		canonical.Field{Name: "inputs", Value: inputs},
 		canonical.Field{Name: "outputs", Value: outputs},
-		canonical.Field{Name: "author", Value: []byte(tx.Author)},
+		canonical.Field{Name: "author", Value: tx.Author.Bytes()},
 	)
+}
+
+func tradePreimage(tx TradeTx) ([]byte, error) {
+	inputsA, err := valuePreimages(tx.InputsA)
+	if err != nil {
+		return nil, fmt.Errorf("inputs_a: %w", err)
+	}
+	inputsB, err := valuePreimages(tx.InputsB)
+	if err != nil {
+		return nil, fmt.Errorf("inputs_b: %w", err)
+	}
+	outputsA, err := valuePreimages(tx.OutputsA)
+	if err != nil {
+		return nil, fmt.Errorf("outputs_a: %w", err)
+	}
+	outputsB, err := valuePreimages(tx.OutputsB)
+	if err != nil {
+		return nil, fmt.Errorf("outputs_b: %w", err)
+	}
+
+	return canonical.EncodeFields(
+		canonical.Field{Name: "kind", Value: "trade_tx"},
+		canonical.Field{Name: "inputs_a", Value: inputsA},
+		canonical.Field{Name: "inputs_b", Value: inputsB},
+		canonical.Field{Name: "outputs_a", Value: outputsA},
+		canonical.Field{Name: "outputs_b", Value: outputsB},
+		canonical.Field{Name: "party_a", Value: tx.PartyA.Bytes()},
+		canonical.Field{Name: "party_b", Value: tx.PartyB.Bytes()},
+		canonical.Field{Name: "timestamp", Value: tx.Timestamp},
+	)
+}
+
+func valuePreimages(values []Value) ([][]byte, error) {
+	out := make([][]byte, len(values))
+	for i, value := range values {
+		preimage, err := valuePreimage(value)
+		if err != nil {
+			return nil, fmt.Errorf("value %d: %w", i, err)
+		}
+		out[i] = preimage
+	}
+	return out, nil
 }
 
 func publicKeyFromPrivate(priv crypto.PrivateKey) (crypto.PublicKey, error) {

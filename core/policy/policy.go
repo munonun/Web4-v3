@@ -83,11 +83,18 @@ func (p *Policy) EvaluateTransfer(tx *model.TransferTx, inputs []model.Value) Ac
 	return AcceptanceResult{Decision: Accept, Score: score, Reasons: []string{"input issuers trusted", "transfer accepted"}}
 }
 
-func IssuerKey(pub crypto.PublicKey) string {
-	return hex.EncodeToString(pub)
+func IssuerKey(pub any) string {
+	switch p := pub.(type) {
+	case crypto.PublicKey:
+		return hex.EncodeToString(p)
+	case model.NodeID:
+		return hex.EncodeToString(p[:])
+	default:
+		return ""
+	}
 }
 
-func (p *Policy) issuerTrust(issuer crypto.PublicKey) (float64, bool) {
+func (p *Policy) issuerTrust(issuer model.NodeID) (float64, bool) {
 	if p == nil || p.TrustedIssuers == nil {
 		return 0, false
 	}

@@ -88,6 +88,12 @@ func encodeValue(buf *bytes.Buffer, v any) error {
 
 	rv := reflect.ValueOf(v)
 	switch rv.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		encodeInt(buf, rv.Int())
+		return nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		encodeUint(buf, rv.Uint())
+		return nil
 	case reflect.Array:
 		return encodeList(buf, rv)
 	case reflect.Slice:
