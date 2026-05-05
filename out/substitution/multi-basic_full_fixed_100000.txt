@@ -9,16 +9,35 @@ spread: 0.01
 enable_substitution: true
 utility_mode: fixed
 
+price_model: pipeline
+
 final:
-SKUG_mean: 0.31
-SKUG_spread: 0.06
+SKUG_mean: 0.80
+SKUG_spread: 0.46
 SKUG_share: 0.50
-WEB4_mean: 0.02
-WEB4_spread: 0.01
+SKUG_flow_share: 0.45
+SKUG_trade_flow: 9114.20
+SKUG_payment_flow: 16.00
+SKUG_consumption_flow: 11999.91
+SKUG_demand_fulfilled: 8015.20
+WEB4_mean: 0.40
+WEB4_spread: 0.23
 WEB4_share: 0.50
+WEB4_flow_share: 0.55
+WEB4_trade_flow: 11129.08
+WEB4_payment_flow: 2003.21
+WEB4_consumption_flow: 11999.94
+WEB4_demand_fulfilled: 9103.87
 dominant_asset: SKUG
-switch_count: 9
-total_trades: 599985
-total_cross_asset_trades: 9
-total_volume: 18019.36
-SKUG_WEB4_rate: 17.3573
+dominant_asset_by_holdings: SKUG
+dominant_asset_by_flow: WEB4
+flow_concentration: 0.5498
+switch_count: 1105
+total_trades: 550403
+total_cross_asset_trades: 1105
+total_volume: 18224.07
+total_trade_flow: 20243.28
+total_payment_flow: 2019.21
+total_consumption_flow: 23999.85
+total_demand_fulfilled: 17119.07
+SKUG_WEB4_rate: 2.2567

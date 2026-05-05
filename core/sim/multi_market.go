@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+
+	pricecore "web4-v3/core/price"
 )
 
 type MultiMarketConfig struct {
@@ -19,6 +21,7 @@ type MultiMarketConfig struct {
 	EnableCycle        bool
 	EnableSubstitution bool
 	UtilityMode        string
+	PriceModel         string
 	MaxQty             float64
 }
 
@@ -83,6 +86,7 @@ func DefaultMultiMarketConfig() MultiMarketConfig {
 		EnableDemand:  true,
 		EnableCycle:   true,
 		UtilityMode:   "fixed",
+		PriceModel:    PriceModelAcceptance,
 		MaxQty:        1,
 	}
 }
@@ -107,13 +111,16 @@ func RunMultiMarketSimulation(cfg MultiMarketConfig) (MultiMarketResult, error) 
 
 	current := state.Copy()
 	currentInventory := inventory.Copy()
+	priceState := NewMultiPriceState(cfg.Universe, current)
+	priceCfg := defaultMultiPipelinePriceConfig()
+	pt := multiMarketPriceTable(cfg, current, currentInventory, demand, priceState, priceCfg, nodeIDs, 0)
 	metrics := make([]MultiMarketMetrics, 0, cfg.Steps+1)
 	totalTrades := 0
 	totalCrossTrades := 0
 	totalSwitches := 0
 	totalVolume := 0.0
 	totalFlows := NewAssetFlowMetrics(cfg.Universe.IDs())
-	metrics = append(metrics, MultiMarketStepMetrics(0, current, currentInventory, cfg.Universe, NewAssetFlowMetrics(cfg.Universe.IDs()), 0, 0, 0, 0))
+	metrics = append(metrics, MultiMarketStepMetrics(0, current, currentInventory, cfg.Universe, NewAssetFlowMetrics(cfg.Universe.IDs()), 0, 0, 0, 0, pt))
 
 	for step := 1; step <= cfg.Steps; step++ {
 		stepFlows := NewAssetFlowMetrics(cfg.Universe.IDs())
@@ -125,14 +132,14 @@ func RunMultiMarketSimulation(cfg MultiMarketConfig) (MultiMarketResult, error) 
 			current = StepMultiDemandPricePressure(current, currentInventory, demand, cfg.Universe, cfg.Alpha)
 		}
 
-		pt := PriceTableFromMultiAcceptance(current)
+		pt = multiMarketPriceTable(cfg, current, currentInventory, demand, priceState, priceCfg, nodeIDs, int64(step))
 		executed := 0
 		crossTrades := 0
 		stepVolume := 0.0
 		if cfg.EnableDemand {
 			if cfg.EnableSubstitution {
-				current = StepSubstitutionPressure(current, currentInventory, preference, cfg.Universe, cfg.Alpha)
-				pt = PriceTableFromMultiAcceptance(current)
+				current = StepSubstitutionPressure(current, currentInventory, preference, cfg.Universe, cfg.Alpha, pt)
+				pt = multiMarketPriceTable(cfg, current, currentInventory, demand, priceState, priceCfg, nodeIDs, int64(step))
 				_ = valueDemand
 			}
 			for _, assetID := range cfg.Universe.IDs() {
@@ -155,6 +162,7 @@ func RunMultiMarketSimulation(cfg MultiMarketConfig) (MultiMarketResult, error) 
 						stepVolume += quote.Quantity
 						stepFlows.AddTrade(assetID, quote.Quantity)
 						stepFlows.AddDemandFulfilled(assetID, quote.Quantity)
+						recordSameAssetObservation(&priceState, assetID, quote.ClearingPrice, quote.Quantity, sameAssetObservationWeight(current, assetID, quote.Seller, quote.Buyer), int64(step))
 					}
 				}
 			}
@@ -200,6 +208,13 @@ func RunMultiMarketSimulation(cfg MultiMarketConfig) (MultiMarketResult, error) 
 							stepFlows.AddTrade(quote.SellAsset, quote.SellQty)
 							stepFlows.AddTrade(quote.BuyAsset, quote.BuyQty)
 							stepFlows.AddPayment(quote.BuyAsset, quote.BuyQty)
+							recordCrossAssetObservations(
+								&priceState,
+								quote,
+								crossAssetObservationWeight(current, quote.SellAsset, quote.Seller, quote.Buyer),
+								crossAssetObservationWeight(current, quote.BuyAsset, quote.Seller, quote.Buyer),
+								int64(step),
+							)
 						}
 					}
 				}
@@ -213,7 +228,8 @@ func RunMultiMarketSimulation(cfg MultiMarketConfig) (MultiMarketResult, error) 
 		totalCrossTrades += crossTrades
 		totalVolume += stepVolume
 		addAssetFlows(totalFlows, stepFlows)
-		metrics = append(metrics, MultiMarketStepMetrics(step, current, currentInventory, cfg.Universe, stepFlows, executed, crossTrades, totalSwitches, stepVolume))
+		pt = multiMarketPriceTable(cfg, current, currentInventory, demand, priceState, priceCfg, nodeIDs, int64(step))
+		metrics = append(metrics, MultiMarketStepMetrics(step, current, currentInventory, cfg.Universe, stepFlows, executed, crossTrades, totalSwitches, stepVolume, pt))
 	}
 
 	summary := MultiMarketSummaryFromMetrics(metrics, totalFlows, totalTrades, totalCrossTrades, totalSwitches, totalVolume, cfg.Universe)
@@ -253,6 +269,11 @@ func ValidateMultiMarketConfig(cfg MultiMarketConfig) error {
 	case "full", "chain", "clustered":
 	default:
 		return fmt.Errorf("unknown market topology %q", cfg.Topology)
+	}
+	switch cfg.PriceModel {
+	case "", PriceModelAcceptance, PriceModelPipeline:
+	default:
+		return fmt.Errorf("unknown price model %q", cfg.PriceModel)
 	}
 
 	return nil
@@ -341,14 +362,18 @@ func MultiMarketScenario(cfg MultiMarketConfig) (MultiAcceptanceState, Inventory
 	return state, inv, demand, consumption, production, preference, valueDemand, nil
 }
 
-func MultiMarketStepMetrics(step int, state MultiAcceptanceState, inv InventoryState, universe AssetUniverse, flows AssetFlowMetrics, executedTrades int, crossTrades int, switchCount int, volume float64) MultiMarketMetrics {
-	pt := PriceTableFromMultiAcceptance(state)
+func multiMarketPriceTable(cfg MultiMarketConfig, state MultiAcceptanceState, inv InventoryState, demand DemandState, ps MultiPriceState, priceCfg pricecore.PriceConfig, nodeIDs []string, nowUnix int64) PriceTable {
+	if cfg.PriceModel == "" || cfg.PriceModel == PriceModelAcceptance {
+		return PriceTableFromMultiAcceptance(state)
+	}
+	return priceTableFromMultiPipelineForNodes(ps, priceCfg, cfg.Universe, inv, demand, nodeIDs, nowUnix)
+}
+
+func MultiMarketStepMetrics(step int, state MultiAcceptanceState, inv InventoryState, universe AssetUniverse, flows AssetFlowMetrics, executedTrades int, crossTrades int, switchCount int, volume float64, pt PriceTable) MultiMarketMetrics {
 	assetMeans := map[string]float64{}
 	assetSpreads := map[string]float64{}
 	for _, assetID := range universe.IDs() {
-		assetState := state.AssetState(assetID)
-		assetMeans[assetID] = AcceptanceMean(assetState)
-		assetSpreads[assetID] = assetSpread(assetState)
+		assetMeans[assetID], assetSpreads[assetID] = assetPriceMeanSpread(pt, state, assetID)
 	}
 	exchangeRates := map[string]float64{}
 	assetShares := assetInventoryShares(inv, universe)
@@ -422,9 +447,8 @@ func MultiMarketSummaryFromMetrics(metrics []MultiMarketMetrics, flows AssetFlow
 	return summary
 }
 
-func StepSubstitutionPressure(state MultiAcceptanceState, inv InventoryState, pref PortfolioPreference, universe AssetUniverse, alpha float64) MultiAcceptanceState {
+func StepSubstitutionPressure(state MultiAcceptanceState, inv InventoryState, pref PortfolioPreference, universe AssetUniverse, alpha float64, pt PriceTable) MultiAcceptanceState {
 	next := state.Copy()
-	pt := PriceTableFromMultiAcceptance(state)
 	for _, nodeID := range multiNodeIDs(state) {
 		preferred := PreferredAsset(pt, pref, nodeID, universe)
 		for _, assetID := range universe.IDs() {
@@ -438,6 +462,35 @@ func StepSubstitutionPressure(state MultiAcceptanceState, inv InventoryState, pr
 		}
 	}
 	return next
+}
+
+func assetPriceMeanSpread(pt PriceTable, state MultiAcceptanceState, assetID string) (float64, float64) {
+	nodeIDs := multiNodeIDs(state)
+	if len(nodeIDs) == 0 {
+		return 0, 0
+	}
+	minPrice := math.Inf(1)
+	maxPrice := math.Inf(-1)
+	sum := 0.0
+	count := 0
+	for _, nodeID := range nodeIDs {
+		price, ok := pt.Get(nodeID, assetID)
+		if !ok {
+			continue
+		}
+		sum += price
+		count++
+		if price < minPrice {
+			minPrice = price
+		}
+		if price > maxPrice {
+			maxPrice = price
+		}
+	}
+	if count == 0 {
+		return 0, 0
+	}
+	return sum / float64(count), maxPrice - minPrice
 }
 
 func substitutionSellerCanSwitch(pt PriceTable, inv InventoryState, pref PortfolioPreference, universe AssetUniverse, nodeID, sellAsset, buyAsset string) bool {

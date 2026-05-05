@@ -90,6 +90,7 @@ type multiMarketJSONOutput struct {
 	Seed               int64                    `json:"seed"`
 	EnableSubstitution bool                     `json:"enable_substitution"`
 	UtilityMode        string                   `json:"utility_mode"`
+	PriceModel         string                   `json:"price_model"`
 	Summary            sim.MultiMarketSummary   `json:"summary"`
 	Metrics            []sim.MultiMarketMetrics `json:"metrics,omitempty"`
 }
@@ -157,6 +158,7 @@ func runMultiMarket(opts marketOptions, stdout io.Writer) error {
 	cfg.EnableCycle = opts.Config.EnableCycle
 	cfg.EnableSubstitution = opts.Config.EnableSubstitution
 	cfg.UtilityMode = opts.Config.UtilityMode
+	cfg.PriceModel = opts.Config.PriceModel
 	cfg.MaxQty = opts.Config.MaxQty
 	cfg.Universe = sim.NewAssetUniverse(parseAssetIDs(opts.Assets))
 
@@ -210,9 +212,6 @@ func parseMarketOptions(args []string) (marketOptions, error) {
 	}
 
 	if opts.MultiAsset {
-		if opts.Config.PriceModel != "" && opts.Config.PriceModel != sim.PriceModelAcceptance {
-			return marketOptions{}, fmt.Errorf("price-model %q is only implemented for single-asset market simulations", opts.Config.PriceModel)
-		}
 		cfg := sim.DefaultMultiMarketConfig()
 		cfg.Scenario = opts.Config.Scenario
 		cfg.Topology = opts.Config.Topology
@@ -225,6 +224,7 @@ func parseMarketOptions(args []string) (marketOptions, error) {
 		cfg.EnableCycle = opts.Config.EnableCycle
 		cfg.EnableSubstitution = opts.Config.EnableSubstitution
 		cfg.UtilityMode = opts.Config.UtilityMode
+		cfg.PriceModel = opts.Config.PriceModel
 		cfg.MaxQty = opts.Config.MaxQty
 		cfg.Universe = sim.NewAssetUniverse(parseAssetIDs(opts.Assets))
 		if err := sim.ValidateMultiMarketConfig(cfg); err != nil {
@@ -481,6 +481,7 @@ func writeMultiMarketText(w io.Writer, result sim.MultiMarketResult) {
 	fmt.Fprintf(w, "spread: %.2f\n\n", cfg.Spread)
 	fmt.Fprintf(w, "enable_substitution: %t\n", cfg.EnableSubstitution)
 	fmt.Fprintf(w, "utility_mode: %s\n\n", cfg.UtilityMode)
+	fmt.Fprintf(w, "price_model: %s\n\n", cfg.PriceModel)
 
 	fmt.Fprintln(w, "final:")
 	for _, assetID := range cfg.Universe.IDs() {
@@ -522,6 +523,7 @@ func writeMultiMarketJSON(w io.Writer, result sim.MultiMarketResult, includeStep
 		Seed:               result.Config.Seed,
 		EnableSubstitution: result.Config.EnableSubstitution,
 		UtilityMode:        result.Config.UtilityMode,
+		PriceModel:         result.Config.PriceModel,
 		Summary:            result.Summary,
 	}
 	if includeSteps {

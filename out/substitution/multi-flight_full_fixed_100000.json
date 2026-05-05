@@ -11,24 +11,52 @@
   "seed": 1,
   "enable_substitution": true,
   "utility_mode": "fixed",
+  "price_model": "pipeline",
   "summary": {
-    "FinalAssetMeans": {
-      "SKUG": 0.01653463577740571,
-      "WEB4": 0.35934529648177493
+    "final_asset_means": {
+      "SKUG": 0.17802512829513506,
+      "WEB4": 0.2984969974060853
     },
-    "FinalAssetSpreads": {
-      "SKUG": 0.0033339480525413634,
-      "WEB4": 0.05092816004681622
+    "final_asset_spreads": {
+      "SKUG": 0.0968813322364681,
+      "WEB4": 0.16242470025120817
     },
-    "FinalAssetShares": {
-      "SKUG": 0.499806306722634,
-      "WEB4": 0.5001936932773661
+    "final_asset_shares": {
+      "SKUG": 0.4998129512943636,
+      "WEB4": 0.5001870487056366
     },
-    "DominantAsset": "WEB4",
-    "TotalTrades": 999345,
-    "TotalCrossAssetTrades": 287,
-    "TotalSwitchCount": 287,
-    "TotalVolume": 20362.025458286793,
-    "ExampleExchangeRate": 0.0462046656081681
+    "dominant_asset": "WEB4",
+    "dominant_asset_by_holdings": "WEB4",
+    "dominant_asset_by_flow": "SKUG",
+    "flow_concentration": 0.500050313838218,
+    "flow_shares": {
+      "SKUG": 0.500050313838218,
+      "WEB4": 0.499949686161782
+    },
+    "trade_flow": {
+      "SKUG": 10008.394786419496,
+      "WEB4": 10006.380746063274
+    },
+    "payment_flow": {
+      "SKUG": 0,
+      "WEB4": 0
+    },
+    "consumption_flow": {
+      "SKUG": 11999.027900823352,
+      "WEB4": 12000.000000018916
+    },
+    "demand_fulfilled": {
+      "SKUG": 10008.394786419496,
+      "WEB4": 10006.380746063274
+    },
+    "total_trade_flow": 20014.77553248277,
+    "total_payment_flow": 0,
+    "total_consumption_flow": 23999.027900842266,
+    "total_demand_fulfilled": 20014.77553248277,
+    "total_trades": 999765,
+    "total_cross_asset_trades": 0,
+    "total_switch_count": 0,
+    "total_volume": 20014.77553248277,
+    "example_exchange_rate": 0.6457783646980295
   }
 }

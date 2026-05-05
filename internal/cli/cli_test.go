@@ -229,6 +229,18 @@ func TestCLIMultiAssetMarketRuns(t *testing.T) {
 	}
 }
 
+func TestCLIMultiAssetPipelinePriceModelRuns(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sim", "market", "--scenario", "multi-flight", "--multi-asset", "--assets", "SKUG,WEB4", "--topology", "full", "--steps", "5", "--enable-demand", "--enable-cycle", "--enable-substitution", "--price-model", "pipeline"}, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code %d, stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "price_model: pipeline") || !strings.Contains(stdout.String(), "SKUG_WEB4_rate:") {
+		t.Fatalf("unexpected output: %s", stdout.String())
+	}
+}
+
 func TestCLIMultiAssetCSVOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	path := filepath.Join(t.TempDir(), "multi.csv")

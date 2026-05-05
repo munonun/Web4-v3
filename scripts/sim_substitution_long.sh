@@ -8,6 +8,7 @@ GOCACHE="${GOCACHE:-/tmp/go-build}"
 STEPS="${STEPS:-100000}"
 OUT_DIR="${OUT_DIR:-out/substitution}"
 ASSETS="${ASSETS:-SKUG,WEB4}"
+PRICE_MODEL="${PRICE_MODEL:-pipeline}"
 
 mkdir -p "$OUT_DIR"
 
@@ -24,7 +25,7 @@ run_case() {
   local txt_path="${OUT_DIR}/${name}.txt"
 
   echo
-  echo "=== ${scenario}/${topology}/${utility} steps=${STEPS} ==="
+  echo "=== ${scenario}/${topology}/${utility} steps=${STEPS} price_model=${PRICE_MODEL} ==="
   ./web4 sim market \
     --scenario "$scenario" \
     --multi-asset \
@@ -35,6 +36,7 @@ run_case() {
     --enable-cycle \
     --enable-substitution \
     --utility-mode "$utility" \
+    --price-model "$PRICE_MODEL" \
     --csv "$csv_path" > "$txt_path"
 
   ./web4 sim market \
@@ -47,6 +49,7 @@ run_case() {
     --enable-cycle \
     --enable-substitution \
     --utility-mode "$utility" \
+    --price-model "$PRICE_MODEL" \
     --json > "$json_path"
 
   cat "$txt_path"
