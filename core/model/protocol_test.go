@@ -19,12 +19,33 @@ func TestProtocolIssueTxCreatesInventoryBackedValue(t *testing.T) {
 	}
 	tx.ID = mustIssueTxID(t, tx)
 
-	inv, err := ApplyIssueTx(NewInventoryState(), tx)
+	inv, err := ApplyStructuralIssueTx(NewInventoryState(), tx)
 	if err != nil {
 		t.Fatalf("apply issue: %v", err)
 	}
 	if got := inv.Get(owner, unit); got != 10 {
 		t.Fatalf("holding %d, want 10", got)
+	}
+}
+
+func TestStructuralIssueValidationDoesNotAuthorizeUnsignedIssue(t *testing.T) {
+	issuer := testNode(t)
+	owner := testNode(t)
+	unit := testUnit(t, issuer, "SKUG")
+	output := testValue(t, unit, 10, owner, 100)
+	tx := IssueTx{
+		Unit:      unit,
+		Outputs:   []Value{output},
+		Issuer:    issuer,
+		Timestamp: 100,
+	}
+	tx.ID = mustIssueTxID(t, tx)
+
+	if err := ValidateStructuralIssueTx(&tx); err != nil {
+		t.Fatalf("structural validation: %v", err)
+	}
+	if err := ValidateIssueTx(&tx, output); err == nil {
+		t.Fatal("expected signed issue validation to reject unsigned structural issue")
 	}
 }
 

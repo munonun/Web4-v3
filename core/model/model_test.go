@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"testing"
 
 	"web4-v3/core/crypto"
@@ -113,6 +114,127 @@ func TestTransferWithZeroAmountOutputFails(t *testing.T) {
 	}
 }
 
+func TestTransferDuplicateInputValueRejected(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	tx := TransferTx{
+		Inputs: []ValueID{input.ID, input.ID},
+		Outputs: []Value{
+			transferOutput(input, input.Owner, 100),
+		},
+		Author: input.Owner,
+	}
+	tx.ID = mustTransferTxID(t, tx)
+	preimage, err := transferPreimage(tx)
+	if err != nil {
+		t.Fatalf("transfer preimage: %v", err)
+	}
+	tx.Signature, err = crypto.Sign(ownerPriv, preimage)
+	if err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+
+	if err := ValidateTransferTx(&tx, []Value{input, input}); err == nil {
+		t.Fatal("expected duplicate input value rejection")
+	}
+}
+
+func TestTransferDuplicateTxInputIDRejected(t *testing.T) {
+	_, inputA, ownerPriv := mustIssueToOwner(t, 100, 0)
+	inputB := inputA
+	inputB.CreatedAt++
+	inputB.ID = mustValueID(t, inputB)
+	tx := TransferTx{
+		Inputs: []ValueID{inputA.ID, inputA.ID},
+		Outputs: []Value{
+			transferOutput(inputA, inputA.Owner, 100),
+		},
+		Author: inputA.Owner,
+	}
+	tx.ID = mustTransferTxID(t, tx)
+	preimage, err := transferPreimage(tx)
+	if err != nil {
+		t.Fatalf("transfer preimage: %v", err)
+	}
+	tx.Signature, err = crypto.Sign(ownerPriv, preimage)
+	if err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+
+	if err := ValidateTransferTx(&tx, []Value{inputA, inputB}); err == nil {
+		t.Fatal("expected duplicate tx input id rejection")
+	}
+}
+
+func TestTransferNonCanonicalInputValueIDRejected(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	tx := mustTransfer(t, ownerPriv, []Value{input}, []Value{transferOutput(input, input.Owner, 100)})
+	forged := input
+	forged.Amount = 200
+
+	if err := ValidateTransferTx(tx, []Value{forged}); err == nil {
+		t.Fatal("expected non-canonical input value rejection")
+	}
+}
+
+func TestTransferConservationCannotBeInflatedByDuplicateInputs(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+
+	if _, err := NewTransferTx(ownerPriv, []Value{input, input}, []Value{transferOutput(input, input.Owner, 200)}); err == nil {
+		t.Fatal("expected duplicate inputs to fail before conservation can be inflated")
+	}
+}
+
+func TestTransferMaxDepthInputConstructorError(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	input.Depth = math.MaxUint32
+	input.ID = mustValueID(t, input)
+
+	if _, err := NewTransferTx(ownerPriv, []Value{input}, []Value{transferOutput(input, input.Owner, 100)}); err == nil {
+		t.Fatal("expected max-depth input constructor error")
+	}
+}
+
+func TestTransferValidatorRejectsOverflowOutputDepth(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	input.Depth = math.MaxUint32
+	input.ID = mustValueID(t, input)
+	output := transferOutput(input, input.Owner, 100)
+	output.Depth = 0
+	output.ID = mustValueID(t, output)
+	tx := TransferTx{
+		Inputs:  []ValueID{input.ID},
+		Outputs: []Value{output},
+		Author:  input.Owner,
+	}
+	tx.ID = mustTransferTxID(t, tx)
+	preimage, err := transferPreimage(tx)
+	if err != nil {
+		t.Fatalf("transfer preimage: %v", err)
+	}
+	tx.Signature, err = crypto.Sign(ownerPriv, preimage)
+	if err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+
+	if err := ValidateTransferTx(&tx, []Value{input}); err == nil {
+		t.Fatal("expected validator depth overflow rejection")
+	}
+}
+
+func TestTransferNormalDepthIncrements(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	input.Depth = 7
+	input.ID = mustValueID(t, input)
+
+	tx := mustTransfer(t, ownerPriv, []Value{input}, []Value{transferOutput(input, input.Owner, 100)})
+	if got := tx.Outputs[0].Depth; got != 8 {
+		t.Fatalf("output depth %d, want 8", got)
+	}
+	if err := ValidateTransferTx(tx, []Value{input}); err != nil {
+		t.Fatalf("validate transfer: %v", err)
+	}
+}
+
 func TestTxIDsStableAndSignatureIndependent(t *testing.T) {
 	issue, input, ownerPriv := mustIssueToOwner(t, 100, 0)
 	issueID, err := IssueTxID(*issue)
@@ -174,6 +296,24 @@ func mustTransfer(t *testing.T, authorPriv crypto.PrivateKey, inputs []Value, ou
 		t.Fatalf("new transfer tx: %v", err)
 	}
 	return tx
+}
+
+func mustTransferTxID(t *testing.T, tx TransferTx) TxID {
+	t.Helper()
+	id, err := TransferTxID(tx)
+	if err != nil {
+		t.Fatalf("transfer id: %v", err)
+	}
+	return id
+}
+
+func mustValueID(t *testing.T, value Value) ValueID {
+	t.Helper()
+	id, err := ValueIDFor(value)
+	if err != nil {
+		t.Fatalf("value id: %v", err)
+	}
+	return id
 }
 
 func transferOutput(input Value, owner NodeID, amount Amount) Value {

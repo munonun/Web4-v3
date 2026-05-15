@@ -24,17 +24,21 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 		return nil, err
 	}
 
-	maxDepth := uint32(0)
-	for i, input := range inputs {
+	canonicalInputs, err := canonicalUniqueInputs(inputs)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, input := range canonicalInputs {
 		if input.Owner != authorID {
 			return nil, fmt.Errorf("input %d is not owned by author", i)
 		}
-		if input.Depth > maxDepth {
-			maxDepth = input.Depth
-		}
 	}
 
-	nextDepth := maxDepth + 1
+	nextDepth, err := nextTransferDepth(canonicalInputs)
+	if err != nil {
+		return nil, err
+	}
 	normalizedOutputs := make([]Value, len(outputs))
 	copy(normalizedOutputs, outputs)
 	for i := range normalizedOutputs {
@@ -46,12 +50,12 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 		normalizedOutputs[i].ID = id
 	}
 
-	if err := checkConservation(inputs, normalizedOutputs); err != nil {
+	if err := checkConservation(canonicalInputs, normalizedOutputs); err != nil {
 		return nil, err
 	}
 
-	txInputs := make([]ValueID, len(inputs))
-	for i, input := range inputs {
+	txInputs := make([]ValueID, len(canonicalInputs))
+	for i, input := range canonicalInputs {
 		txInputs[i] = input.ID
 	}
 

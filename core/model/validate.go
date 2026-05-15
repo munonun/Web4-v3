@@ -82,23 +82,21 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 		return fmt.Errorf("input count mismatch")
 	}
 
-	maxDepth := uint32(0)
-	for i, input := range inputValues {
-		if !sameHash(tx.Inputs[i], input.ID) {
-			return fmt.Errorf("input %d id mismatch", i)
-		}
+	inputs, err := canonicalInputsForTransfer(tx.Inputs, inputValues)
+	if err != nil {
+		return err
+	}
+
+	for i, input := range inputs {
 		if input.Owner != tx.Author {
 			return fmt.Errorf("input %d is not owned by author", i)
 		}
-		if input.Depth > maxDepth {
-			maxDepth = input.Depth
-		}
 	}
 
-	if maxDepth == math.MaxUint32 {
-		return fmt.Errorf("input depth overflow")
+	expectedDepth, err := nextTransferDepth(inputs)
+	if err != nil {
+		return err
 	}
-	expectedDepth := maxDepth + 1
 	for i, output := range tx.Outputs {
 		if !validAmount(output.Amount) {
 			return fmt.Errorf("output %d amount must be greater than zero", i)
@@ -115,7 +113,7 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 		}
 	}
 
-	if err := checkConservation(inputValues, tx.Outputs); err != nil {
+	if err := checkConservation(inputs, tx.Outputs); err != nil {
 		return err
 	}
 
@@ -136,6 +134,64 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 	}
 
 	return nil
+}
+
+func canonicalInputsForTransfer(txInputs []ValueID, inputValues []Value) ([]Value, error) {
+	inputsByID := make(map[ValueID]Value, len(inputValues))
+	for i, input := range inputValues {
+		expectedID, err := ValueIDFor(input)
+		if err != nil {
+			return nil, fmt.Errorf("input %d: %w", i, err)
+		}
+		if input.ID != expectedID {
+			return nil, fmt.Errorf("input %d value id mismatch", i)
+		}
+		if _, ok := inputsByID[input.ID]; ok {
+			return nil, fmt.Errorf("duplicate input value id")
+		}
+		inputsByID[input.ID] = input
+	}
+
+	seenTxInputs := make(map[ValueID]struct{}, len(txInputs))
+	inputs := make([]Value, len(txInputs))
+	for i, inputID := range txInputs {
+		if _, ok := seenTxInputs[inputID]; ok {
+			return nil, fmt.Errorf("duplicate tx input id")
+		}
+		seenTxInputs[inputID] = struct{}{}
+
+		input, ok := inputsByID[inputID]
+		if !ok {
+			return nil, fmt.Errorf("input %d id mismatch", i)
+		}
+		inputs[i] = input
+	}
+
+	if len(seenTxInputs) != len(inputsByID) {
+		return nil, fmt.Errorf("input set mismatch")
+	}
+	return inputs, nil
+}
+
+func canonicalUniqueInputs(inputs []Value) ([]Value, error) {
+	txInputs := make([]ValueID, len(inputs))
+	for i, input := range inputs {
+		txInputs[i] = input.ID
+	}
+	return canonicalInputsForTransfer(txInputs, inputs)
+}
+
+func nextTransferDepth(inputs []Value) (uint32, error) {
+	maxDepth := uint32(0)
+	for _, input := range inputs {
+		if input.Depth > maxDepth {
+			maxDepth = input.Depth
+		}
+	}
+	if maxDepth == math.MaxUint32 {
+		return 0, fmt.Errorf("input depth overflow")
+	}
+	return maxDepth + 1, nil
 }
 
 type unitBalance struct {

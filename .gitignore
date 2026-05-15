@@ -27,6 +27,12 @@ go.work.sum
 # env file
 .env
 
+# Generated simulation outputs
+out/market/
+out/market_matrix/
+out/substitution/
+out/substitution_matrix/
+
 # Editor/IDE
 # .idea/
 # .vscode/

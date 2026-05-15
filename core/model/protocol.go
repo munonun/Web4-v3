@@ -143,8 +143,11 @@ func (s InventoryState) Copy() InventoryState {
 	return out
 }
 
-func ApplyIssueTx(inv InventoryState, tx IssueTx) (InventoryState, error) {
-	if err := ValidateProtocolIssueTx(&tx); err != nil {
+// ApplyStructuralIssueTx applies a structurally valid issuance transaction.
+// It does not authorize issuance or verify an issuer signature; callers that
+// need authorization must use ValidateIssueTx before updating accepted state.
+func ApplyStructuralIssueTx(inv InventoryState, tx IssueTx) (InventoryState, error) {
+	if err := ValidateStructuralIssueTx(&tx); err != nil {
 		return InventoryState{}, err
 	}
 	next := inv.Copy()
@@ -178,7 +181,9 @@ func ApplyTradeTx(inv InventoryState, tx TradeTx) (InventoryState, error) {
 	return next, nil
 }
 
-func ValidateProtocolIssueTx(tx *IssueTx) error {
+// ValidateStructuralIssueTx checks deterministic IDs and output structure only.
+// It does not authorize issuance or verify an issuer signature.
+func ValidateStructuralIssueTx(tx *IssueTx) error {
 	if tx == nil {
 		return fmt.Errorf("issue tx is nil")
 	}
