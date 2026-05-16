@@ -39,8 +39,7 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 	if err != nil {
 		return nil, err
 	}
-	normalizedOutputs := make([]Value, len(outputs))
-	copy(normalizedOutputs, outputs)
+	normalizedOutputs := normalizeTransferOutputExpiries(canonicalInputs, outputs)
 	for i := range normalizedOutputs {
 		normalizedOutputs[i].Depth = nextDepth
 		id, err := ValueIDFor(normalizedOutputs[i])

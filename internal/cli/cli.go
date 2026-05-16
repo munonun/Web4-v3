@@ -19,6 +19,8 @@ const usage = `usage:
   web4 sim market [--scenario split|clustered|random|collapse|high-liquidity|fragmented|demand-basic|demand-fragmented|demand-random|cycle-basic|cycle-fragmented|cycle-random|multi-basic|multi-compete|multi-fragmented|multi-flight|multi-coexist] [--topology full|chain|clustered] [--steps n] [--alpha n] [--spread n] [--min-profit n] [--seed n] [--trades-per-step n] [--enable-demand] [--max-qty n] [--enable-cycle] [--consumption-rate n] [--production-rate n] [--price-model acceptance|pipeline] [--multi-asset] [--assets SKUG,WEB4] [--enable-substitution] [--utility-mode fixed|random|clustered] [--json] [--json-steps] [--csv path]
 `
 
+const MaxSteps = 1_000_000
+
 type acceptanceOptions struct {
 	Scenario string
 	Alpha    float64
@@ -210,6 +212,9 @@ func parseMarketOptions(args []string) (marketOptions, error) {
 	if fs.NArg() != 0 {
 		return marketOptions{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	if err := validateCLISteps(opts.Config.Steps); err != nil {
+		return marketOptions{}, err
+	}
 
 	if opts.MultiAsset {
 		cfg := sim.DefaultMultiMarketConfig()
@@ -281,6 +286,9 @@ func parseAcceptanceOptions(args []string) (acceptanceOptions, error) {
 	if fs.NArg() != 0 {
 		return acceptanceOptions{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
+	if err := validateCLISteps(opts.Steps); err != nil {
+		return acceptanceOptions{}, err
+	}
 	if opts.Epsilon <= 0 {
 		return acceptanceOptions{}, fmt.Errorf("epsilon must be > 0")
 	}
@@ -292,6 +300,16 @@ func parseAcceptanceOptions(args []string) (acceptanceOptions, error) {
 	}
 
 	return opts, nil
+}
+
+func validateCLISteps(steps int) error {
+	if steps < 0 {
+		return fmt.Errorf("steps must be >= 0")
+	}
+	if steps > MaxSteps {
+		return fmt.Errorf("steps must be <= %d", MaxSteps)
+	}
+	return nil
 }
 
 func ScenarioState(name string) (sim.AcceptanceState, error) {

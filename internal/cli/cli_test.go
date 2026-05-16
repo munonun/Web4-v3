@@ -58,6 +58,18 @@ func TestCLIInvalidTauFails(t *testing.T) {
 	}
 }
 
+func TestCLIHugeAcceptanceStepsRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sim", "acceptance", "--steps", "1000001"}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(stderr.String(), "steps must be <=") {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestCLIInvalidScenarioFails(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"sim", "acceptance", "--scenario", "missing"}, &stdout, &stderr)
@@ -193,6 +205,18 @@ func TestCLIMarketInvalidOptionsFail(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 	if !strings.Contains(stderr.String(), "alpha") {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
+func TestCLIHugeMarketStepsRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sim", "market", "--steps", "1000001"}, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatal("expected failure")
+	}
+	if !strings.Contains(stderr.String(), "steps must be <=") {
 		t.Fatalf("unexpected stderr: %s", stderr.String())
 	}
 }

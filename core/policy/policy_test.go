@@ -54,6 +54,20 @@ func TestTransferFromTrustedIssuerAccepted(t *testing.T) {
 	}
 }
 
+func TestTransferExpiryExtensionRejectedByPolicyValidation(t *testing.T) {
+	_, input, issuerPub, ownerPriv := mustPolicyIssue(t, 100, 200)
+	tx := mustPolicyTransfer(t, ownerPriv, input, 100)
+	tx.Outputs[0].ExpiryUnix = 0
+	tx.Outputs[0].ID = mustPolicyValueID(t, tx.Outputs[0])
+	p := trustedPolicy(issuerPub, 100)
+
+	result := p.EvaluateTransfer(tx, []model.Value{input})
+	if result.Decision != Reject {
+		t.Fatalf("decision %s, want %s", result.Decision, Reject)
+	}
+	assertReasonContains(t, result, "validation failed")
+}
+
 func TestTransferExceedingMaxDepthRejected(t *testing.T) {
 	_, input, issuerPub, ownerPriv := mustPolicyIssue(t, 100, 200)
 	tx := mustPolicyTransfer(t, ownerPriv, input, 100)
@@ -130,6 +144,15 @@ func mustPolicyTransfer(t *testing.T, ownerPriv crypto.PrivateKey, input model.V
 		t.Fatalf("new transfer tx: %v", err)
 	}
 	return tx
+}
+
+func mustPolicyValueID(t *testing.T, value model.Value) model.ValueID {
+	t.Helper()
+	id, err := model.ValueIDFor(value)
+	if err != nil {
+		t.Fatalf("value id: %v", err)
+	}
+	return id
 }
 
 func assertReasonContains(t *testing.T, result AcceptanceResult, want string) {

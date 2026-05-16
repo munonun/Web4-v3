@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/ed25519"
 	"testing"
 
 	"web4-v3/core/crypto"
@@ -252,6 +253,25 @@ func TestSignVerifyTradeIntent(t *testing.T) {
 	}
 }
 
+func TestZeroTimestampTradeIntentRejected(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	intent := IntentFromQuote(q, seller.ID, 0)
+
+	if _, err := SignTradeIntent(seller.PrivateKey, intent); err == nil {
+		t.Fatal("zero timestamp intent signed")
+	}
+
+	sig := signedIntentUnsafe(t, seller.PrivateKey, intent)
+	if VerifyTradeIntent(sig) {
+		t.Fatal("zero timestamp intent verified")
+	}
+	_, buyerSig := signQuoteBoth(t, seller, buyer, q)
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sig, buyerSig); err == nil {
+		t.Fatal("zero timestamp intent executed")
+	}
+}
+
 func TestNodeSignQuoteRules(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
@@ -352,6 +372,49 @@ func TestExecuteSignedTradeRejectsReplayFromStore(t *testing.T) {
 	}
 }
 
+func TestSignedTradeReplayUsesStableAuthorizedTradeID(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer.Store = replayStore
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	tx, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig)
+	if err != nil {
+		t.Fatalf("first signed trade: %v", err)
+	}
+	auth := AuthorizedTradeTx{Tx: *tx, SellerAuth: sellerSig, BuyerAuth: buyerSig}
+	authID, err := AuthorizedTradeID(auth)
+	if err != nil {
+		t.Fatalf("auth id: %v", err)
+	}
+	if !replayStore.HasExecutedTrade(authID) {
+		t.Fatal("stable authorized trade ID was not marked")
+	}
+
+	seller.NowUnix = func() int64 { return 999 }
+	buyer.NowUnix = func() int64 { return 1000 }
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected replay rejection")
+	}
+
+	freshSeller, freshBuyer := cloneSignedTradeParties(t, seller, buyer, sellUnit, buyUnit)
+	freshSeller.NowUnix = func() int64 { return 5000 }
+	freshBuyer.NowUnix = func() int64 { return 6000 }
+	replayedTx, err := ExecuteSignedTrade(freshSeller, freshBuyer, q, sellerSig, buyerSig)
+	if err != nil {
+		t.Fatalf("same signed terms should execute on fresh runtime: %v", err)
+	}
+	replayedAuthID, err := AuthorizedTradeID(AuthorizedTradeTx{Tx: *replayedTx, SellerAuth: sellerSig, BuyerAuth: buyerSig})
+	if err != nil {
+		t.Fatalf("replayed auth id: %v", err)
+	}
+	if replayedAuthID != authID {
+		t.Fatal("same signed trade produced different AuthorizedTradeID")
+	}
+}
+
 func TestExecuteSignedTradePersistenceFailureDoesNotMutateRuntime(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	failing := newFakeStore()
@@ -369,6 +432,38 @@ func TestExecuteSignedTradePersistenceFailureDoesNotMutateRuntime(t *testing.T) 
 	}
 	if failing.markedCount != 0 {
 		t.Fatalf("replay mark happened despite failed persistence")
+	}
+}
+
+func TestExecuteSignedTradePartialPersistenceRejectsReplay(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	failing := newFakeStore()
+	failing.failAfterMark = true
+	seller.Store = failing
+	buyer.Store = failing
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	tx, err := buildTradeTx(seller.ID, buyer.ID, q, q.Timestamp)
+	if err != nil {
+		t.Fatalf("build trade: %v", err)
+	}
+	authID, err := AuthorizedTradeID(AuthorizedTradeTx{Tx: *tx, SellerAuth: sellerSig, BuyerAuth: buyerSig})
+	if err != nil {
+		t.Fatalf("auth id: %v", err)
+	}
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected partial persistence failure")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("failed partial persistence mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+	if !failing.HasExecutedTrade(authID) {
+		t.Fatal("partial failure did not leave replay marker")
+	}
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected replay rejection after partial failure")
 	}
 }
 
@@ -451,6 +546,42 @@ func signQuoteBoth(t *testing.T, seller *Node, buyer *Node, q Quote) (SignedTrad
 	return sellerSig, buyerSig
 }
 
+func signedIntentUnsafe(t *testing.T, priv crypto.PrivateKey, intent TradeIntent) SignedTradeIntent {
+	t.Helper()
+	pub, ok := ed25519.PrivateKey(priv).Public().(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("private key public component has unexpected type")
+	}
+	preimage, err := tradeIntentPreimage(intent)
+	if err != nil {
+		t.Fatalf("intent preimage: %v", err)
+	}
+	sig, err := crypto.Sign(priv, preimage)
+	if err != nil {
+		t.Fatalf("sign unsafe intent: %v", err)
+	}
+	return SignedTradeIntent{Intent: intent, PublicKey: append(crypto.PublicKey(nil), pub...), Signature: sig}
+}
+
+func cloneSignedTradeParties(t *testing.T, seller *Node, buyer *Node, sellUnit model.UnitID, buyUnit model.UnitID) (*Node, *Node) {
+	t.Helper()
+	freshSeller, err := NewNode(seller.PrivateKey, seller.PriceConfig)
+	if err != nil {
+		t.Fatalf("new fresh seller: %v", err)
+	}
+	freshBuyer, err := NewNode(buyer.PrivateKey, buyer.PriceConfig)
+	if err != nil {
+		t.Fatalf("new fresh buyer: %v", err)
+	}
+	configureUnit(t, freshSeller, sellUnit, 1)
+	configureUnit(t, freshSeller, buyUnit, 1)
+	configureUnit(t, freshBuyer, sellUnit, 1)
+	configureUnit(t, freshBuyer, buyUnit, 1)
+	freshSeller.AddInventory(sellUnit, model.FromFloat(10))
+	freshBuyer.AddInventory(buyUnit, model.FromFloat(10))
+	return freshSeller, freshBuyer
+}
+
 func configureUnit(t *testing.T, n *Node, unit model.UnitID, score float64) {
 	t.Helper()
 	n.Features[unit] = price.AssetFeatures{Cost: score}
@@ -493,6 +624,7 @@ type fakeStore struct {
 	prices            map[model.NodeID]map[model.UnitID]price.PriceResult
 	trades            map[model.TxID]AuthorizedTradeTx
 	failSaveInventory bool
+	failAfterMark     bool
 	markedCount       int
 }
 
@@ -547,10 +679,36 @@ func (s *fakeStore) LoadAuthorizedTrade(id model.TxID) (AuthorizedTradeTx, bool)
 	tx, ok := s.trades[id]
 	return tx, ok
 }
+func (s *fakeStore) PersistExecutedTrade(id model.TxID, tx AuthorizedTradeTx, states ...PersistedNodeState) error {
+	if s.HasExecutedTrade(id) {
+		return errReplay
+	}
+	if s.failSaveInventory {
+		return errFakeStore
+	}
+	s.trades[id] = tx
+	for _, state := range states {
+		s.inventory[state.ID] = state.Inventory.Copy()
+		s.flow[state.ID] = copyFlow(state.Flow)
+		s.prices[state.ID] = copyPriceState(state.PriceState)
+	}
+	if err := s.MarkExecutedTrade(id); err != nil {
+		return err
+	}
+	if s.failAfterMark {
+		return errFakeStore
+	}
+	return nil
+}
 func (s *fakeStore) Close() error { return nil }
 
 var errFakeStore = &fakeStoreError{}
+var errReplay = &replayError{}
 
 type fakeStoreError struct{}
 
 func (*fakeStoreError) Error() string { return "fake store failure" }
+
+type replayError struct{}
+
+func (*replayError) Error() string { return "trade replay rejected" }

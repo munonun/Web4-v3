@@ -58,6 +58,9 @@ func SignTradeIntent(priv crypto.PrivateKey, intent TradeIntent) (SignedTradeInt
 	if len(priv) != ed25519.PrivateKeySize {
 		return SignedTradeIntent{}, fmt.Errorf("invalid private key length: got %d, want %d", len(priv), ed25519.PrivateKeySize)
 	}
+	if err := validateTradeIntent(intent); err != nil {
+		return SignedTradeIntent{}, err
+	}
 	pub, ok := ed25519.PrivateKey(priv).Public().(ed25519.PublicKey)
 	if !ok || len(pub) != ed25519.PublicKeySize {
 		return SignedTradeIntent{}, fmt.Errorf("invalid private key public component")
@@ -85,6 +88,9 @@ func SignTradeIntent(priv crypto.PrivateKey, intent TradeIntent) (SignedTradeInt
 }
 
 func VerifyTradeIntent(sig SignedTradeIntent) bool {
+	if err := validateTradeIntent(sig.Intent); err != nil {
+		return false
+	}
 	nodeID, err := model.NodeIDFromPublicKey(sig.PublicKey)
 	if err != nil || nodeID != sig.Intent.Party {
 		return false
@@ -107,14 +113,13 @@ func (n *Node) SignQuote(q Quote) (SignedTradeIntent, error) {
 	if len(n.PrivateKey) == 0 {
 		return SignedTradeIntent{}, fmt.Errorf("node has no private key")
 	}
+	if q.Timestamp <= 0 {
+		return SignedTradeIntent{}, fmt.Errorf("quote timestamp must be greater than zero")
+	}
 	if !n.AcceptQuote(q) {
 		return SignedTradeIntent{}, fmt.Errorf("node no longer accepts quote")
 	}
-	timestamp := q.Timestamp
-	if timestamp == 0 {
-		timestamp = n.NowUnix()
-	}
-	return SignTradeIntent(n.PrivateKey, IntentFromQuote(q, n.ID, timestamp))
+	return SignTradeIntent(n.PrivateKey, IntentFromQuote(q, n.ID, q.Timestamp))
 }
 
 func (n *Node) VerifySignedIntent(sig SignedTradeIntent) bool {
@@ -164,6 +169,13 @@ func tradeIntentPreimage(intent TradeIntent) ([]byte, error) {
 	)
 }
 
+func validateTradeIntent(intent TradeIntent) error {
+	if intent.Timestamp <= 0 {
+		return fmt.Errorf("intent timestamp must be greater than zero")
+	}
+	return nil
+}
+
 func intentMatchesQuote(intent TradeIntent, q Quote, party model.NodeID) bool {
 	return intent.Party == party &&
 		intent.Seller == q.Seller &&
@@ -172,7 +184,7 @@ func intentMatchesQuote(intent TradeIntent, q Quote, party model.NodeID) bool {
 		intent.BuyUnit == q.BuyUnit &&
 		intent.SellAmount == q.SellAmount &&
 		intent.BuyAmount == q.BuyAmount &&
-		(q.Timestamp == 0 || intent.Timestamp == q.Timestamp)
+		intent.Timestamp == q.Timestamp
 }
 
 func economicTermsMatch(a TradeIntent, b TradeIntent) bool {

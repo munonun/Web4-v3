@@ -31,6 +31,13 @@ func Add(a, b Amount) Amount {
 	return a + b
 }
 
+func CheckedAdd(a, b Amount) (Amount, error) {
+	if (b > 0 && a > Amount(math.MaxInt64)-b) || (b < 0 && a < Amount(math.MinInt64)-b) {
+		return 0, fmt.Errorf("amount overflow")
+	}
+	return a + b, nil
+}
+
 func Sub(a, b Amount) (Amount, error) {
 	if b < 0 {
 		return 0, fmt.Errorf("amount must be non-negative")

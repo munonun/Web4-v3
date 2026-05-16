@@ -315,11 +315,19 @@ func checkNoDuplicateValueIDs(groups ...[]Value) error {
 func checkTradeConservation(tx *TradeTx) error {
 	inputs := make(map[UnitID]Amount)
 	outputs := make(map[UnitID]Amount)
-	for _, value := range append(append([]Value{}, tx.InputsA...), tx.InputsB...) {
-		inputs[value.Unit] = Add(inputs[value.Unit], value.Amount)
+	for i, value := range append(append([]Value{}, tx.InputsA...), tx.InputsB...) {
+		next, err := CheckedAdd(inputs[value.Unit], value.Amount)
+		if err != nil {
+			return fmt.Errorf("input %d amount overflow", i)
+		}
+		inputs[value.Unit] = next
 	}
-	for _, value := range append(append([]Value{}, tx.OutputsA...), tx.OutputsB...) {
-		outputs[value.Unit] = Add(outputs[value.Unit], value.Amount)
+	for i, value := range append(append([]Value{}, tx.OutputsA...), tx.OutputsB...) {
+		next, err := CheckedAdd(outputs[value.Unit], value.Amount)
+		if err != nil {
+			return fmt.Errorf("output %d amount overflow", i)
+		}
+		outputs[value.Unit] = next
 	}
 	if len(inputs) != len(outputs) {
 		return fmt.Errorf("trade changes unit set")

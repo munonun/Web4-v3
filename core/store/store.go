@@ -22,5 +22,7 @@ type Store interface {
 	SaveAuthorizedTrade(id model.TxID, tx node.AuthorizedTradeTx) error
 	LoadAuthorizedTrade(id model.TxID) (node.AuthorizedTradeTx, bool)
 
+	PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeTx, states ...node.PersistedNodeState) error
+
 	Close() error
 }

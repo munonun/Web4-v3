@@ -84,6 +84,24 @@ func TestJSONStoreReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart buyer: %v", err)
 	}
+	if got := restartedSeller.Balance(sellUnit); got != model.FromFloat(8) {
+		t.Fatalf("restarted seller sell balance %d, want %d", got, model.FromFloat(8))
+	}
+	if got := restartedSeller.Balance(buyUnit); got != model.FromFloat(2) {
+		t.Fatalf("restarted seller buy balance %d, want %d", got, model.FromFloat(2))
+	}
+	if got := restartedBuyer.Balance(sellUnit); got != model.FromFloat(2) {
+		t.Fatalf("restarted buyer sell balance %d, want %d", got, model.FromFloat(2))
+	}
+	if got := restartedBuyer.Balance(buyUnit); got != model.FromFloat(8) {
+		t.Fatalf("restarted buyer buy balance %d, want %d", got, model.FromFloat(8))
+	}
+	if restartedSeller.Flow[sellUnit].TradeVolume == 0 || restartedBuyer.Flow[buyUnit].PaymentVolume == 0 {
+		t.Fatalf("flow state was not persisted seller=%+v buyer=%+v", restartedSeller.Flow, restartedBuyer.Flow)
+	}
+	if _, ok := reopened.LoadAuthorizedTrade(authID); !ok {
+		t.Fatal("authorized trade was not persisted")
+	}
 	if _, err := node.ExecuteSignedTrade(restartedSeller, restartedBuyer, q, sellerSig, buyerSig); err == nil {
 		t.Fatal("expected replay rejection after restart")
 	}

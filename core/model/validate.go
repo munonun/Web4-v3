@@ -43,17 +43,22 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 		return fmt.Errorf("invalid issue signature")
 	}
 
+	if len(tx.Outputs) != 1 {
+		return fmt.Errorf("signed issue tx must have one output")
+	}
+	txOutput := tx.Outputs[0]
+	expectedTxOutputID, err := ValueIDFor(txOutput)
+	if err != nil {
+		return fmt.Errorf("signed output: %w", err)
+	}
+	if !sameHash(txOutput.ID, expectedTxOutputID) {
+		return fmt.Errorf("signed output value id mismatch")
+	}
+	if txOutput != output {
+		return fmt.Errorf("output does not match signed issue output")
+	}
 	if output.Amount != tx.Amount || !sameHash(output.Unit, tx.Unit) || output.Owner != tx.Owner || output.Issuer != tx.Issuer || output.ExpiryUnix != tx.ExpiryUnix || output.Depth != 0 {
 		return fmt.Errorf("output does not match issue tx")
-	}
-	if len(tx.Outputs) > 0 {
-		if len(tx.Outputs) != 1 {
-			return fmt.Errorf("legacy issue tx must have one output")
-		}
-		txOutput := tx.Outputs[0]
-		if !sameHash(txOutput.ID, output.ID) || txOutput.Amount != output.Amount || !sameHash(txOutput.Unit, output.Unit) || txOutput.Owner != output.Owner {
-			return fmt.Errorf("issue tx output mismatch")
-		}
 	}
 
 	expectedValueID, err := ValueIDFor(output)
@@ -114,6 +119,9 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 	}
 
 	if err := checkConservation(inputs, tx.Outputs); err != nil {
+		return err
+	}
+	if err := checkExpiryPropagation(inputs, tx.Outputs); err != nil {
 		return err
 	}
 
@@ -200,6 +208,11 @@ type unitBalance struct {
 	set    bool
 }
 
+type unitIssuerKey struct {
+	unit   UnitID
+	issuer NodeID
+}
+
 func checkConservation(inputs []Value, outputs []Value) error {
 	balances := make(map[UnitID]unitBalance)
 
@@ -211,7 +224,11 @@ func checkConservation(inputs []Value, outputs []Value) error {
 		if balance.set && balance.issuer != input.Issuer {
 			return fmt.Errorf("input %d issuer mismatch for unit", i)
 		}
-		balance.amount = Add(balance.amount, input.Amount)
+		next, err := CheckedAdd(balance.amount, input.Amount)
+		if err != nil {
+			return fmt.Errorf("input %d amount overflow", i)
+		}
+		balance.amount = next
 		balance.issuer = input.Issuer
 		balance.set = true
 		balances[input.Unit] = balance
@@ -246,4 +263,66 @@ func checkConservation(inputs []Value, outputs []Value) error {
 	}
 
 	return nil
+}
+
+func checkExpiryPropagation(inputs []Value, outputs []Value) error {
+	const noExpiry = int64(0)
+	minExpiry := make(map[unitIssuerKey]int64)
+	seen := make(map[unitIssuerKey]struct{})
+
+	for _, input := range inputs {
+		key := unitIssuerKey{unit: input.Unit, issuer: input.Issuer}
+		seen[key] = struct{}{}
+		if input.ExpiryUnix == noExpiry {
+			continue
+		}
+		if minExpiry[key] == noExpiry || input.ExpiryUnix < minExpiry[key] {
+			minExpiry[key] = input.ExpiryUnix
+		}
+	}
+
+	for i, output := range outputs {
+		key := unitIssuerKey{unit: output.Unit, issuer: output.Issuer}
+		if _, ok := seen[key]; !ok {
+			return fmt.Errorf("output %d uses unknown unit issuer", i)
+		}
+		expiry := minExpiry[key]
+		if expiry == noExpiry {
+			continue
+		}
+		if output.ExpiryUnix == noExpiry {
+			return fmt.Errorf("output %d removes expiry constraint", i)
+		}
+		if output.ExpiryUnix > expiry {
+			return fmt.Errorf("output %d extends expiry constraint", i)
+		}
+	}
+
+	return nil
+}
+
+func normalizeTransferOutputExpiries(inputs []Value, outputs []Value) []Value {
+	minExpiry := make(map[unitIssuerKey]int64)
+	for _, input := range inputs {
+		if input.ExpiryUnix == 0 {
+			continue
+		}
+		key := unitIssuerKey{unit: input.Unit, issuer: input.Issuer}
+		if minExpiry[key] == 0 || input.ExpiryUnix < minExpiry[key] {
+			minExpiry[key] = input.ExpiryUnix
+		}
+	}
+
+	normalized := make([]Value, len(outputs))
+	copy(normalized, outputs)
+	for i := range normalized {
+		expiry := minExpiry[unitIssuerKey{unit: normalized[i].Unit, issuer: normalized[i].Issuer}]
+		if expiry == 0 {
+			continue
+		}
+		if normalized[i].ExpiryUnix == 0 || normalized[i].ExpiryUnix > expiry {
+			normalized[i].ExpiryUnix = expiry
+		}
+	}
+	return normalized
 }

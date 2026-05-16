@@ -37,11 +37,7 @@ func (s *JSONStore) MarkExecutedTrade(id model.TxID) error {
 }
 
 func (s *JSONStore) SaveInventory(id model.NodeID, inv model.InventoryState) error {
-	dto := inventoryDTO{Node: nodeHex(id), Holdings: map[string]model.Amount{}}
-	for unit, amount := range inv.Holdings[id] {
-		dto.Holdings[unitHex(unit)] = amount
-	}
-	return writeJSONAtomic(s.inventoryPath(id), dto)
+	return writeJSONAtomic(s.inventoryPath(id), inventoryDTOFor(id, inv))
 }
 
 func (s *JSONStore) LoadInventory(id model.NodeID) (model.InventoryState, error) {
@@ -61,16 +57,7 @@ func (s *JSONStore) LoadInventory(id model.NodeID) (model.InventoryState, error)
 }
 
 func (s *JSONStore) SaveFlow(id model.NodeID, flow map[model.UnitID]model.FlowRecord) error {
-	dto := flowDTO{Node: nodeHex(id), Records: map[string]flowRecordDTO{}}
-	for unit, record := range flow {
-		dto.Records[unitHex(unit)] = flowRecordDTO{
-			TradeVolume:     record.TradeVolume,
-			PaymentVolume:   record.PaymentVolume,
-			Consumption:     record.Consumption,
-			DemandFulfilled: record.DemandFulfilled,
-		}
-	}
-	return writeJSONAtomic(s.flowPath(id), dto)
+	return writeJSONAtomic(s.flowPath(id), flowDTOFor(id, flow))
 }
 
 func (s *JSONStore) LoadFlow(id model.NodeID) (map[model.UnitID]model.FlowRecord, error) {
@@ -96,11 +83,7 @@ func (s *JSONStore) LoadFlow(id model.NodeID) (map[model.UnitID]model.FlowRecord
 }
 
 func (s *JSONStore) SavePriceState(id model.NodeID, state map[model.UnitID]price.PriceResult) error {
-	dto := priceDTO{Node: nodeHex(id), Prices: map[string]price.PriceResult{}}
-	for unit, result := range state {
-		dto.Prices[unitHex(unit)] = result
-	}
-	return writeJSONAtomic(s.pricePath(id), dto)
+	return writeJSONAtomic(s.pricePath(id), priceDTOFor(id, state))
 }
 
 func (s *JSONStore) LoadPriceState(id model.NodeID) (map[model.UnitID]price.PriceResult, error) {
@@ -124,11 +107,42 @@ func (s *JSONStore) SaveAuthorizedTrade(id model.TxID, tx node.AuthorizedTradeTx
 }
 
 func (s *JSONStore) LoadAuthorizedTrade(id model.TxID) (node.AuthorizedTradeTx, bool) {
+	data, err := os.ReadFile(s.tradePath(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return node.AuthorizedTradeTx{}, false
+	}
+	if err != nil || len(data) == 0 {
+		return node.AuthorizedTradeTx{}, false
+	}
 	var tx node.AuthorizedTradeTx
-	if err := readJSONIfExists(s.tradePath(id), &tx); err != nil {
+	if err := json.Unmarshal(data, &tx); err != nil {
 		return node.AuthorizedTradeTx{}, false
 	}
 	return tx, true
+}
+
+// PersistExecutedTrade stages every JSON document to a same-directory temp file
+// before committing the replay marker, authorized trade, and node state files.
+// A filesystem crash between renames can still leave a partial local commit;
+// because the replay marker is renamed first, recovery rejects the signed trade
+// instead of replaying it against possibly changed state.
+func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeTx, states ...node.PersistedNodeState) error {
+	if s.HasExecutedTrade(id) {
+		return fmt.Errorf("trade replay rejected")
+	}
+
+	files := []atomicJSONFile{
+		{path: s.executedPath(id), value: map[string]string{"id": idHex(id)}},
+		{path: s.tradePath(id), value: tx},
+	}
+	for _, state := range states {
+		files = append(files,
+			atomicJSONFile{path: s.inventoryPath(state.ID), value: inventoryDTOFor(state.ID, state.Inventory)},
+			atomicJSONFile{path: s.flowPath(state.ID), value: flowDTOFor(state.ID, state.Flow)},
+			atomicJSONFile{path: s.pricePath(state.ID), value: priceDTOFor(state.ID, state.PriceState)},
+		)
+	}
+	return writeJSONBatchAtomic(files)
 }
 
 func (s *JSONStore) Close() error {
@@ -177,6 +191,45 @@ type priceDTO struct {
 	Prices map[string]price.PriceResult `json:"prices"`
 }
 
+func inventoryDTOFor(id model.NodeID, inv model.InventoryState) inventoryDTO {
+	dto := inventoryDTO{Node: nodeHex(id), Holdings: map[string]model.Amount{}}
+	for unit, amount := range inv.Holdings[id] {
+		dto.Holdings[unitHex(unit)] = amount
+	}
+	return dto
+}
+
+func flowDTOFor(id model.NodeID, flow map[model.UnitID]model.FlowRecord) flowDTO {
+	dto := flowDTO{Node: nodeHex(id), Records: map[string]flowRecordDTO{}}
+	for unit, record := range flow {
+		dto.Records[unitHex(unit)] = flowRecordDTO{
+			TradeVolume:     record.TradeVolume,
+			PaymentVolume:   record.PaymentVolume,
+			Consumption:     record.Consumption,
+			DemandFulfilled: record.DemandFulfilled,
+		}
+	}
+	return dto
+}
+
+func priceDTOFor(id model.NodeID, state map[model.UnitID]price.PriceResult) priceDTO {
+	dto := priceDTO{Node: nodeHex(id), Prices: map[string]price.PriceResult{}}
+	for unit, result := range state {
+		dto.Prices[unitHex(unit)] = result
+	}
+	return dto
+}
+
+type atomicJSONFile struct {
+	path  string
+	value any
+}
+
+type stagedJSONFile struct {
+	path string
+	tmp  string
+}
+
 func writeJSONAtomic(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -190,6 +243,58 @@ func writeJSONAtomic(path string, value any) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func writeJSONBatchAtomic(files []atomicJSONFile) error {
+	staged := make([]stagedJSONFile, 0, len(files))
+	defer func() {
+		for _, file := range staged {
+			if file.tmp != "" {
+				_ = os.Remove(file.tmp)
+			}
+		}
+	}()
+
+	for _, file := range files {
+		tmp, err := stageJSONFile(file.path, file.value)
+		if err != nil {
+			return err
+		}
+		staged = append(staged, stagedJSONFile{path: file.path, tmp: tmp})
+	}
+
+	for i := range staged {
+		if err := os.Rename(staged[i].tmp, staged[i].path); err != nil {
+			return err
+		}
+		staged[i].tmp = ""
+	}
+	return nil
+}
+
+func stageJSONFile(path string, value any) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmp := file.Name()
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tmp, nil
 }
 
 func readJSONIfExists(path string, out any) error {

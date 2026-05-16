@@ -7,6 +7,13 @@ import (
 	"web4-v3/core/price"
 )
 
+type PersistedNodeState struct {
+	ID         model.NodeID
+	Inventory  model.InventoryState
+	Flow       map[model.UnitID]model.FlowRecord
+	PriceState map[model.UnitID]price.PriceResult
+}
+
 type Store interface {
 	HasExecutedTrade(id model.TxID) bool
 	MarkExecutedTrade(id model.TxID) error
@@ -22,6 +29,8 @@ type Store interface {
 
 	SaveAuthorizedTrade(id model.TxID, tx AuthorizedTradeTx) error
 	LoadAuthorizedTrade(id model.TxID) (AuthorizedTradeTx, bool)
+
+	PersistExecutedTrade(id model.TxID, tx AuthorizedTradeTx, states ...PersistedNodeState) error
 
 	Close() error
 }

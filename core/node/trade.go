@@ -77,6 +77,9 @@ func ExecuteSignedTrade(
 	if !VerifyTradeIntent(buyerSig) {
 		return nil, fmt.Errorf("invalid buyer authorization")
 	}
+	if sellerSig.Intent.Timestamp <= 0 || buyerSig.Intent.Timestamp <= 0 {
+		return nil, fmt.Errorf("authorization timestamp must be greater than zero")
+	}
 	if sellerSig.Intent.Party != seller.ID || buyerSig.Intent.Party != buyer.ID {
 		return nil, fmt.Errorf("authorization party mismatch")
 	}
@@ -106,9 +109,6 @@ func ExecuteSignedTrade(
 	}
 
 	now := sellerSig.Intent.Timestamp
-	if now == 0 {
-		now = maxInt64(seller.NowUnix(), buyer.NowUnix())
-	}
 	tx, err := buildTradeTx(seller.ID, buyer.ID, q, now)
 	if err != nil {
 		return nil, err
@@ -231,54 +231,33 @@ func preparedTradeState(seller *Node, buyer *Node, q Quote, now int64) (*Node, *
 
 func persistSignedTrade(seller *Node, buyer *Node, id model.TxID, auth AuthorizedTradeTx, nextSeller *Node, nextBuyer *Node) error {
 	if seller.Store != nil && buyer.Store == seller.Store {
-		if err := seller.Store.SaveAuthorizedTrade(id, auth); err != nil {
-			return err
-		}
-		if err := saveNodeStateWithoutReplayMark(seller.Store, seller.ID, nextSeller); err != nil {
-			return err
-		}
-		if err := saveNodeStateWithoutReplayMark(seller.Store, buyer.ID, nextBuyer); err != nil {
-			return err
-		}
-		return seller.Store.MarkExecutedTrade(id)
+		return seller.Store.PersistExecutedTrade(
+			id,
+			auth,
+			persistedNodeState(seller.ID, nextSeller),
+			persistedNodeState(buyer.ID, nextBuyer),
+		)
 	}
 	if seller.Store != nil {
-		if err := persistNodeState(seller.Store, seller.ID, id, auth, nextSeller); err != nil {
+		if err := seller.Store.PersistExecutedTrade(id, auth, persistedNodeState(seller.ID, nextSeller)); err != nil {
 			return err
 		}
 	}
 	if buyer.Store != nil && buyer.Store != seller.Store {
-		if err := persistNodeState(buyer.Store, buyer.ID, id, auth, nextBuyer); err != nil {
+		if err := buyer.Store.PersistExecutedTrade(id, auth, persistedNodeState(buyer.ID, nextBuyer)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func persistNodeState(store Store, id model.NodeID, tradeID model.TxID, auth AuthorizedTradeTx, next *Node) error {
-	if err := store.SaveAuthorizedTrade(tradeID, auth); err != nil {
-		return err
+func persistedNodeState(id model.NodeID, next *Node) PersistedNodeState {
+	return PersistedNodeState{
+		ID:         id,
+		Inventory:  next.Inventory,
+		Flow:       next.Flow,
+		PriceState: next.PriceState,
 	}
-	if err := store.SaveInventory(id, next.Inventory); err != nil {
-		return err
-	}
-	if err := store.SaveFlow(id, next.Flow); err != nil {
-		return err
-	}
-	if err := store.SavePriceState(id, next.PriceState); err != nil {
-		return err
-	}
-	return store.MarkExecutedTrade(tradeID)
-}
-
-func saveNodeStateWithoutReplayMark(store Store, id model.NodeID, next *Node) error {
-	if err := store.SaveInventory(id, next.Inventory); err != nil {
-		return err
-	}
-	if err := store.SaveFlow(id, next.Flow); err != nil {
-		return err
-	}
-	return store.SavePriceState(id, next.PriceState)
 }
 
 func cloneRuntimeState(n *Node) *Node {
