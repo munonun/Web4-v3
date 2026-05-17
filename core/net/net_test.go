@@ -221,7 +221,7 @@ func TestPeerRuntimeAppliesDefaultLimits(t *testing.T) {
 	}
 }
 
-func TestServerIdlePeerReturnsOnReadTimeout(t *testing.T) {
+func TestServerIdlePeerTimesOutAndServerContinues(t *testing.T) {
 	probe, err := stdnet.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		if strings.Contains(err.Error(), "operation not permitted") {
@@ -259,16 +259,81 @@ func TestServerIdlePeerReturnsOnReadTimeout(t *testing.T) {
 		cancel()
 		t.Fatalf("dial idle peer: %v", err)
 	}
-	defer conn.Close()
+	_ = conn.Close()
 
-	select {
-	case err := <-errCh:
-		if err == nil {
-			t.Fatal("idle server returned nil")
-		}
-	case <-time.After(time.Second):
+	validConn := dialTCP(t, addr)
+	defer validConn.Close()
+	ping := signedMessage(t, client, message.TypePing, message.PingPayload{TimeUnix: 200}, testNonce(12))
+	if err := transport.WriteFrame(validConn, ping); err != nil {
 		cancel()
-		t.Fatal("idle peer blocked server past timeout")
+		t.Fatalf("write ping after idle peer: %v", err)
+	}
+	resp, err := transport.ReadFrame(validConn)
+	if err != nil {
+		cancel()
+		t.Fatalf("read pong after idle peer: %v", err)
+	}
+	if resp.Envelope.Type != message.TypePong {
+		t.Fatalf("response type %s, want PONG", resp.Envelope.Type)
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("server error %v, want context.Canceled", err)
+	}
+}
+
+func TestServerMalformedFrameClosesOnlyConnection(t *testing.T) {
+	probe, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("localhost sockets are not permitted in this sandbox: %v", err)
+		}
+		t.Fatalf("listen probe: %v", err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	server := &Server{
+		Addr:         addr,
+		Node:         testNode(t, 100),
+		ReadTimeout:  time.Second,
+		WriteTimeout: time.Second,
+	}
+	client := testNode(t, 200)
+	server.PeerPublicKey = client.PublicKey
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe(ctx)
+	}()
+
+	badConn := dialTCP(t, addr)
+	malformed := append([]byte("NOPE"), make([]byte, transport.FrameHeaderSize-4)...)
+	if _, err := badConn.Write(malformed); err != nil {
+		cancel()
+		t.Fatalf("write malformed frame: %v", err)
+	}
+	_ = badConn.Close()
+
+	validConn := dialTCP(t, addr)
+	defer validConn.Close()
+	ping := signedMessage(t, client, message.TypePing, message.PingPayload{TimeUnix: 200}, testNonce(13))
+	if err := transport.WriteFrame(validConn, ping); err != nil {
+		cancel()
+		t.Fatalf("write ping after malformed frame: %v", err)
+	}
+	resp, err := transport.ReadFrame(validConn)
+	if err != nil {
+		cancel()
+		t.Fatalf("read pong after malformed frame: %v", err)
+	}
+	if resp.Envelope.Type != message.TypePong {
+		t.Fatalf("response type %s, want PONG", resp.Envelope.Type)
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("server error %v, want context.Canceled", err)
 	}
 }
 
@@ -347,6 +412,22 @@ func serveOne(t *testing.T, server *node.Node, peerPub crypto.PublicKey, conn st
 		errCh <- runtime.Serve(context.Background())
 	}()
 	return errCh
+}
+
+func dialTCP(t *testing.T, addr string) stdnet.Conn {
+	t.Helper()
+	var conn stdnet.Conn
+	var err error
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = stdnet.Dial("tcp", addr)
+		if err == nil {
+			return conn
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("dial tcp %s: %v", addr, err)
+	return nil
 }
 
 func signedMessage(t *testing.T, n *node.Node, msgType message.MessageType, payload any, nonce [24]byte) message.Message {

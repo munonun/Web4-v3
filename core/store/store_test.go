@@ -112,6 +112,58 @@ func TestJSONStoreReplaySurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestJSONStoreRecoveryCompletesMarkerAfterStateTradeCrash(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	seller, buyer, sellUnit, buyUnit := storedTradeNodes(t, s)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signBoth(t, seller, buyer, q)
+
+	tx, err := node.ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig)
+	if err != nil {
+		t.Fatalf("execute signed trade: %v", err)
+	}
+	auth := node.AuthorizedTradeTx{Tx: *tx, SellerAuth: sellerSig, BuyerAuth: buyerSig}
+	authID, err := node.AuthorizedTradeID(auth)
+	if err != nil {
+		t.Fatalf("auth id: %v", err)
+	}
+	if err := os.Remove(executedPath(root, authID)); err != nil {
+		t.Fatalf("simulate missing marker: %v", err)
+	}
+	if err := os.WriteFile(reservationPath(root, authID), []byte("executing"), 0o600); err != nil {
+		t.Fatalf("simulate executing record: %v", err)
+	}
+
+	recovered, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("recover store: %v", err)
+	}
+	if !recovered.HasExecutedTrade(authID) {
+		t.Fatal("recovery did not mark trade executed")
+	}
+	if _, err := os.Stat(executedPath(root, authID)); err != nil {
+		t.Fatalf("recovery did not recreate marker: %v", err)
+	}
+	restartedSeller, err := node.NewNodeWithStore(seller.PrivateKey, node.DefaultPriceConfig(), recovered)
+	if err != nil {
+		t.Fatalf("restart seller: %v", err)
+	}
+	restartedBuyer, err := node.NewNodeWithStore(buyer.PrivateKey, node.DefaultPriceConfig(), recovered)
+	if err != nil {
+		t.Fatalf("restart buyer: %v", err)
+	}
+	if got := restartedSeller.Balance(sellUnit); got != model.FromFloat(8) {
+		t.Fatalf("recovered seller sell balance %d, want %d", got, model.FromFloat(8))
+	}
+	if _, err := node.ExecuteSignedTrade(restartedSeller, restartedBuyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected replay rejection after recovered marker")
+	}
+}
+
 func TestJSONStorePersistsAuthorizedTrade(t *testing.T) {
 	s, err := store.NewJSONStore(t.TempDir())
 	if err != nil {
@@ -140,6 +192,28 @@ func TestJSONStorePersistsAuthorizedTrade(t *testing.T) {
 	}
 	if loadedID != authID {
 		t.Fatalf("loaded auth ID %x, want %x", loadedID, authID)
+	}
+}
+
+func TestJSONStoreSaveAuthorizedTradeDoesNotMarkExecuted(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{7, 7, 7}
+	if err := s.SaveAuthorizedTrade(id, node.AuthorizedTradeTx{}); err != nil {
+		t.Fatalf("save authorized trade: %v", err)
+	}
+	reopened, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if _, ok := reopened.LoadAuthorizedTrade(id); !ok {
+		t.Fatal("authorized trade did not load after restart")
+	}
+	if reopened.HasExecutedTrade(id) {
+		t.Fatal("saved authorized trade was treated as executed")
 	}
 }
 
@@ -348,4 +422,12 @@ func inventoryPath(root string, id model.NodeID) string {
 
 func tradePath(root string, id model.TxID) string {
 	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".json")
+}
+
+func executedPath(root string, id model.TxID) string {
+	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".executed.json")
+}
+
+func reservationPath(root string, id model.TxID) string {
+	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".executing")
 }

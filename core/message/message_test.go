@@ -300,6 +300,7 @@ func testNode(t *testing.T, now int64) *node.Node {
 		t.Fatalf("new node: %v", err)
 	}
 	n.NowUnix = func() int64 { return now }
+	n.AllowEphemeralReplayUnsafe = true
 	return n
 }
 

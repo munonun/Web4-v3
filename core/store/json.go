@@ -24,12 +24,16 @@ func NewJSONStore(root string) (*JSONStore, error) {
 			return nil, err
 		}
 	}
+	if err := s.recoverTransactions(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
 func (s *JSONStore) HasExecutedTrade(id model.TxID) bool {
-	_, err := os.Stat(s.executedPath(id))
-	return err == nil
+	return exists(s.executedPath(id)) ||
+		exists(s.committedPath(id)) ||
+		exists(s.reservationPath(id))
 }
 
 func (s *JSONStore) MarkExecutedTrade(id model.TxID) error {
@@ -140,10 +144,10 @@ func (s *JSONStore) LoadAuthorizedTrade(id model.TxID) (node.AuthorizedTradeTx, 
 }
 
 // PersistExecutedTrade stages every JSON document to a same-directory temp file,
-// commits trade and node state first, and creates the replay marker last with an
-// exclusive create. The JSON backend is still not crash-proof across all files:
-// a process crash before the final marker can leave staged state files that a
-// retry may overwrite, while a crash after the marker means the trade is final.
+// commits trade and node state first, writes a transaction commit record, and
+// creates the replay marker last with an exclusive create. Recovery treats any
+// surviving commit or reservation artifact as replay evidence so a crash
+// cannot make the same signed trade executable again.
 func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeTx, states ...node.PersistedNodeState) error {
 	if s.HasExecutedTrade(id) {
 		return fmt.Errorf("trade replay rejected")
@@ -172,11 +176,15 @@ func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeT
 	if err != nil {
 		return err
 	}
-	if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
+	if err := writeCommitRecordExclusive(s.committedPath(id), id); err != nil {
 		batch.rollback()
 		return err
 	}
+	if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
+		return err
+	}
 	batch.cleanup()
+	_ = os.Remove(s.committedPath(id))
 	return nil
 }
 
@@ -190,6 +198,10 @@ func (s *JSONStore) executedPath(id model.TxID) string {
 
 func (s *JSONStore) tradePath(id model.TxID) string {
 	return filepath.Join(s.root, "trades", idHex(id)+".json")
+}
+
+func (s *JSONStore) committedPath(id model.TxID) string {
+	return filepath.Join(s.root, "trades", idHex(id)+".committed.json")
 }
 
 func (s *JSONStore) reservationPath(id model.TxID) string {
@@ -318,10 +330,19 @@ func reserveExecutedTrade(path string, id model.TxID) (string, error) {
 		_ = os.Remove(path)
 		return "", err
 	}
+	_ = fsyncDir(filepath.Dir(path))
 	return path, nil
 }
 
 func writeExecutedMarkerExclusive(path string, id model.TxID) error {
+	return writeTradeRecordExclusive(path, id, "executed")
+}
+
+func writeCommitRecordExclusive(path string, id model.TxID) error {
+	return writeTradeRecordExclusive(path, id, "committed")
+}
+
+func writeTradeRecordExclusive(path string, id model.TxID, state string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -332,7 +353,7 @@ func writeExecutedMarkerExclusive(path string, id model.TxID) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(map[string]string{"id": idHex(id)}, "", "  ")
+	data, err := json.MarshalIndent(map[string]string{"id": idHex(id), "state": state}, "", "  ")
 	if err != nil {
 		_ = file.Close()
 		_ = os.Remove(path)
@@ -352,6 +373,7 @@ func writeExecutedMarkerExclusive(path string, id model.TxID) error {
 		_ = os.Remove(path)
 		return err
 	}
+	_ = fsyncDir(filepath.Dir(path))
 	return nil
 }
 
@@ -392,6 +414,7 @@ func writeJSONBatchAtomic(files []atomicJSONFile) (*committedJSONBatch, error) {
 		}
 		staged[i].tmp = ""
 		staged[i].installed = true
+		_ = fsyncDir(filepath.Dir(staged[i].path))
 	}
 	return &committedJSONBatch{files: staged}, nil
 }
@@ -508,6 +531,71 @@ func readJSONIfExists(path string, out any) error {
 		return fmt.Errorf("empty json file: %s", path)
 	}
 	return json.Unmarshal(data, out)
+}
+
+func (s *JSONStore) recoverTransactions() error {
+	tradesDir := filepath.Join(s.root, "trades")
+	entries, err := os.ReadDir(tradesDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		id, ok := tradeArtifactID(entry.Name())
+		if !ok {
+			continue
+		}
+		if exists(s.executedPath(id)) {
+			_ = os.Remove(s.committedPath(id))
+			_ = os.Remove(s.reservationPath(id))
+			continue
+		}
+		if exists(s.committedPath(id)) || (exists(s.reservationPath(id)) && exists(s.tradePath(id))) {
+			if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
+				return err
+			}
+			_ = os.Remove(s.committedPath(id))
+			_ = os.Remove(s.reservationPath(id))
+		}
+	}
+	return nil
+}
+
+func tradeArtifactID(name string) (model.TxID, bool) {
+	for _, suffix := range []string{".committed.json", ".executing", ".json"} {
+		if !hasSuffix(name, suffix) {
+			continue
+		}
+		idString := name[:len(name)-len(suffix)]
+		b, err := hex.DecodeString(idString)
+		if err != nil || len(b) != 32 {
+			return model.TxID{}, false
+		}
+		var id model.TxID
+		copy(id[:], b)
+		return id, true
+	}
+	return model.TxID{}, false
+}
+
+func hasSuffix(s string, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+func exists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func fsyncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func requireNodeMatch(got string, id model.NodeID) error {

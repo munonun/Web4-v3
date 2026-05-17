@@ -2,7 +2,9 @@ package node
 
 import (
 	"crypto/ed25519"
+	"sync"
 	"testing"
+	"time"
 
 	"web4-v3/core/crypto"
 	"web4-v3/core/model"
@@ -372,7 +374,38 @@ func TestExecuteSignedTradeRejectsReplayFromStore(t *testing.T) {
 	}
 }
 
-func TestExecuteSignedTradeRejectsReplayWithoutStore(t *testing.T) {
+func TestExecuteSignedTradeRejectsNilStoreByDefault(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.AllowEphemeralReplayUnsafe = false
+	buyer.AllowEphemeralReplayUnsafe = false
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected nil-store signed trade rejection")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("failed nil-store execution mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeRejectsStorelessFreshRuntimeReplayByDefault(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("unsafe setup execution: %v", err)
+	}
+	freshSeller, freshBuyer := cloneSignedTradeParties(t, seller, buyer, sellUnit, buyUnit)
+	freshSeller.AllowEphemeralReplayUnsafe = false
+	freshBuyer.AllowEphemeralReplayUnsafe = false
+
+	if _, err := ExecuteSignedTrade(freshSeller, freshBuyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected storeless fresh-runtime replay rejection")
+	}
+}
+
+func TestExecuteSignedTradeEphemeralUnsafeRejectsReplay(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
 	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
@@ -385,6 +418,98 @@ func TestExecuteSignedTradeRejectsReplayWithoutStore(t *testing.T) {
 	}
 	if seller.Balance(sellUnit) != model.FromFloat(8) || buyer.Balance(buyUnit) != model.FromFloat(8) {
 		t.Fatalf("replay mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeConcurrentSameTradeOnlyOnce(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer.Store = replayStore
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	const workers = 8
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig)
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful concurrent executions %d, want 1", successes)
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(8) || buyer.Balance(buyUnit) != model.FromFloat(8) {
+		t.Fatalf("bad balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeConcurrentDifferentTradesNoCorruption(t *testing.T) {
+	seller, buyer1, sellUnit, buyUnit := testSignedTradeNodes(t)
+	buyer2 := testSignedNode(t, 100)
+	configureUnit(t, buyer2, sellUnit, 1)
+	configureUnit(t, buyer2, buyUnit, 1)
+	buyer2.AddInventory(buyUnit, model.FromFloat(10))
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer1.Store = replayStore
+	buyer2.Store = replayStore
+	q1 := seller.QuoteSell(buyer1, sellUnit, buyUnit, model.FromFloat(2), 0)
+	q2 := seller.QuoteSell(buyer2, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig1, buyerSig1 := signQuoteBoth(t, seller, buyer1, q1)
+	sellerSig2, buyerSig2 := signQuoteBoth(t, seller, buyer2, q2)
+
+	errCh := make(chan error, 2)
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, err := ExecuteSignedTrade(seller, buyer1, q1, sellerSig1, buyerSig1)
+			errCh <- err
+		}()
+		go func() {
+			defer wg.Done()
+			_, err := ExecuteSignedTrade(seller, buyer2, q2, sellerSig2, buyerSig2)
+			errCh <- err
+		}()
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent signed trades deadlocked")
+	}
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent different trade failed: %v", err)
+		}
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(6) {
+		t.Fatalf("seller sell balance %d, want %d", seller.Balance(sellUnit), model.FromFloat(6))
+	}
+	if buyer1.Balance(sellUnit) != model.FromFloat(2) || buyer2.Balance(sellUnit) != model.FromFloat(2) {
+		t.Fatalf("buyer balances buyer1=%d buyer2=%d", buyer1.Balance(sellUnit), buyer2.Balance(sellUnit))
 	}
 }
 
@@ -573,6 +698,7 @@ func testSignedNode(t *testing.T, now int64) *Node {
 		t.Fatalf("new node: %v", err)
 	}
 	n.NowUnix = func() int64 { return now }
+	n.AllowEphemeralReplayUnsafe = true
 	return n
 }
 
@@ -616,6 +742,8 @@ func cloneSignedTradeParties(t *testing.T, seller *Node, buyer *Node, sellUnit m
 	if err != nil {
 		t.Fatalf("new fresh buyer: %v", err)
 	}
+	freshSeller.AllowEphemeralReplayUnsafe = seller.AllowEphemeralReplayUnsafe
+	freshBuyer.AllowEphemeralReplayUnsafe = buyer.AllowEphemeralReplayUnsafe
 	configureUnit(t, freshSeller, sellUnit, 1)
 	configureUnit(t, freshSeller, buyUnit, 1)
 	configureUnit(t, freshBuyer, sellUnit, 1)
@@ -661,6 +789,7 @@ func testUnit(t *testing.T, issuer model.NodeID, metadata string) model.UnitID {
 }
 
 type fakeStore struct {
+	mu                sync.Mutex
 	executed          map[model.TxID]bool
 	inventory         map[model.NodeID]model.InventoryState
 	flow              map[model.NodeID]map[model.UnitID]model.FlowRecord
@@ -681,13 +810,21 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-func (s *fakeStore) HasExecutedTrade(id model.TxID) bool { return s.executed[id] }
+func (s *fakeStore) HasExecutedTrade(id model.TxID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.executed[id]
+}
 func (s *fakeStore) MarkExecutedTrade(id model.TxID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.executed[id] = true
 	s.markedCount++
 	return nil
 }
 func (s *fakeStore) SaveInventory(id model.NodeID, inv model.InventoryState) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.failSaveInventory {
 		return errFakeStore
 	}
@@ -695,35 +832,51 @@ func (s *fakeStore) SaveInventory(id model.NodeID, inv model.InventoryState) err
 	return nil
 }
 func (s *fakeStore) LoadInventory(id model.NodeID) (model.InventoryState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if inv, ok := s.inventory[id]; ok {
 		return inv.Copy(), nil
 	}
 	return model.NewInventoryState(), nil
 }
 func (s *fakeStore) SaveFlow(id model.NodeID, flow map[model.UnitID]model.FlowRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.flow[id] = copyFlow(flow)
 	return nil
 }
 func (s *fakeStore) LoadFlow(id model.NodeID) (map[model.UnitID]model.FlowRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return copyFlow(s.flow[id]), nil
 }
 func (s *fakeStore) SavePriceState(id model.NodeID, state map[model.UnitID]price.PriceResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.prices[id] = copyPriceState(state)
 	return nil
 }
 func (s *fakeStore) LoadPriceState(id model.NodeID) (map[model.UnitID]price.PriceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return copyPriceState(s.prices[id]), nil
 }
 func (s *fakeStore) SaveAuthorizedTrade(id model.TxID, tx AuthorizedTradeTx) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.trades[id] = tx
 	return nil
 }
 func (s *fakeStore) LoadAuthorizedTrade(id model.TxID) (AuthorizedTradeTx, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, ok := s.trades[id]
 	return tx, ok
 }
 func (s *fakeStore) PersistExecutedTrade(id model.TxID, tx AuthorizedTradeTx, states ...PersistedNodeState) error {
-	if s.HasExecutedTrade(id) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.executed[id] {
 		return errReplay
 	}
 	if s.failSaveInventory {
@@ -735,9 +888,8 @@ func (s *fakeStore) PersistExecutedTrade(id model.TxID, tx AuthorizedTradeTx, st
 		s.flow[state.ID] = copyFlow(state.Flow)
 		s.prices[state.ID] = copyPriceState(state.PriceState)
 	}
-	if err := s.MarkExecutedTrade(id); err != nil {
-		return err
-	}
+	s.executed[id] = true
+	s.markedCount++
 	if s.failAfterMark {
 		return errFakeStore
 	}

@@ -97,16 +97,27 @@ func NewInventoryState() InventoryState {
 }
 
 func (s *InventoryState) Add(node NodeID, unit UnitID, amount Amount) {
+	if err := s.AddChecked(node, unit, amount); err != nil {
+		panic(err)
+	}
+}
+
+func (s *InventoryState) AddChecked(node NodeID, unit UnitID, amount Amount) error {
 	if s.Holdings == nil {
 		s.Holdings = make(map[NodeID]map[UnitID]Amount)
 	}
 	if !validAmount(amount) {
-		return
+		return fmt.Errorf("amount must be greater than zero")
 	}
 	if s.Holdings[node] == nil {
 		s.Holdings[node] = make(map[UnitID]Amount)
 	}
-	s.Holdings[node][unit] = Add(s.Holdings[node][unit], amount)
+	next, err := CheckedAdd(s.Holdings[node][unit], amount)
+	if err != nil {
+		return err
+	}
+	s.Holdings[node][unit] = next
+	return nil
 }
 
 func (s *InventoryState) Sub(node NodeID, unit UnitID, amount Amount) error {
@@ -152,7 +163,9 @@ func ApplyStructuralIssueTx(inv InventoryState, tx IssueTx) (InventoryState, err
 	}
 	next := inv.Copy()
 	for _, output := range tx.Outputs {
-		next.Add(output.Owner, output.Unit, output.Amount)
+		if err := next.AddChecked(output.Owner, output.Unit, output.Amount); err != nil {
+			return InventoryState{}, fmt.Errorf("issue output overflows inventory: %w", err)
+		}
 	}
 	return next, nil
 }
@@ -173,10 +186,14 @@ func ApplyTradeTx(inv InventoryState, tx TradeTx) (InventoryState, error) {
 		}
 	}
 	for _, output := range tx.OutputsA {
-		next.Add(output.Owner, output.Unit, output.Amount)
+		if err := next.AddChecked(output.Owner, output.Unit, output.Amount); err != nil {
+			return InventoryState{}, fmt.Errorf("party A output overflows inventory: %w", err)
+		}
 	}
 	for _, output := range tx.OutputsB {
-		next.Add(output.Owner, output.Unit, output.Amount)
+		if err := next.AddChecked(output.Owner, output.Unit, output.Amount); err != nil {
+			return InventoryState{}, fmt.Errorf("party B output overflows inventory: %w", err)
+		}
 	}
 	return next, nil
 }
@@ -205,7 +222,7 @@ func ValidateStructuralIssueTx(tx *IssueTx) error {
 		if !sameHash(output.Unit, tx.Unit) {
 			return fmt.Errorf("output %d unit mismatch", i)
 		}
-		if len(output.Owner) == 0 {
+		if isZeroNodeID(output.Owner) {
 			return fmt.Errorf("output %d owner is required", i)
 		}
 		expectedID, err := ValueIDFor(output)
@@ -227,7 +244,7 @@ func ValidateTradeTx(tx *TradeTx, inv InventoryState) error {
 	if tx == nil {
 		return fmt.Errorf("trade tx is nil")
 	}
-	if len(tx.PartyA) == 0 || len(tx.PartyB) == 0 {
+	if isZeroNodeID(tx.PartyA) || isZeroNodeID(tx.PartyB) {
 		return fmt.Errorf("trade parties are required")
 	}
 	if tx.PartyA == tx.PartyB {
@@ -285,7 +302,7 @@ func validateValueSet(values []Value, owner NodeID, requireOwned bool) error {
 		if requireOwned && value.Owner != owner {
 			return fmt.Errorf("value %d owner mismatch", i)
 		}
-		if !requireOwned && len(value.Owner) == 0 {
+		if !requireOwned && isZeroNodeID(value.Owner) {
 			return fmt.Errorf("value %d owner is required", i)
 		}
 		expectedID, err := ValueIDFor(value)
@@ -341,7 +358,7 @@ func checkTradeConservation(tx *TradeTx) error {
 }
 
 func ValidateAcceptanceRecord(record AcceptanceRecord) error {
-	if len(record.Node) == 0 {
+	if isZeroNodeID(record.Node) {
 		return fmt.Errorf("node is required")
 	}
 	if len(record.TargetID) == 0 {
@@ -404,8 +421,12 @@ func QuoteTrade(seller, buyer NodeID, sellUnit, buyUnit UnitID, sellAmount, buyA
 		BuyUnit:    buyUnit,
 		SellAmount: sellAmount,
 		BuyAmount:  buyAmount,
-		Executable: len(seller) > 0 && len(buyer) > 0 && seller != buyer && validAmount(sellAmount) && validAmount(buyAmount),
+		Executable: !isZeroNodeID(seller) && !isZeroNodeID(buyer) && seller != buyer && validAmount(sellAmount) && validAmount(buyAmount),
 	}
+}
+
+func isZeroNodeID(id NodeID) bool {
+	return id == (NodeID{})
 }
 
 func EffectiveValue(price float64, pref Preference, unit UnitID) float64 {

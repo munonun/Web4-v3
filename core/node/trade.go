@@ -1,16 +1,24 @@
 package node
 
 import (
+	"bytes"
 	"fmt"
+	"sync"
 
 	"web4-v3/core/model"
 	"web4-v3/core/price"
 )
 
+var signedTradeExecutionMu sync.Mutex
+
 func ExecuteTrade(seller *Node, buyer *Node, q Quote) (*model.TradeTx, error) {
 	if seller == nil || buyer == nil {
 		return nil, fmt.Errorf("seller and buyer are required")
 	}
+	signedTradeExecutionMu.Lock()
+	defer signedTradeExecutionMu.Unlock()
+	unlock := lockTradeNodes(seller, buyer)
+	defer unlock()
 	seller.init()
 	buyer.init()
 	if !q.Executable {
@@ -63,6 +71,10 @@ func ExecuteSignedTrade(
 	if seller == nil || buyer == nil {
 		return nil, fmt.Errorf("seller and buyer are required")
 	}
+	signedTradeExecutionMu.Lock()
+	defer signedTradeExecutionMu.Unlock()
+	unlock := lockTradeNodes(seller, buyer)
+	defer unlock()
 	seller.init()
 	buyer.init()
 	if !q.Executable {
@@ -100,6 +112,10 @@ func ExecuteSignedTrade(
 	}
 	if !economicTermsMatch(sellerSig.Intent, buyerSig.Intent) {
 		return nil, fmt.Errorf("authorizations do not sign the same terms")
+	}
+
+	if err := requireDurableReplayGuard(seller, buyer); err != nil {
+		return nil, err
 	}
 	if !seller.AcceptQuote(q) {
 		return nil, fmt.Errorf("seller rejected quote")
@@ -272,15 +288,24 @@ func persistedNodeState(id model.NodeID, next *Node) PersistedNodeState {
 }
 
 func cloneRuntimeState(n *Node) *Node {
-	clone := *n
-	clone.Inventory = n.Inventory.Copy()
-	clone.PriceState = copyPriceState(n.PriceState)
-	clone.Flow = copyFlow(n.Flow)
-	clone.TradeHistory = copyTradeHistory(n.TradeHistory)
-	clone.SettledVolume = copyAmountMap(n.SettledVolume)
-	clone.LastTradeUnix = copyInt64Map(n.LastTradeUnix)
-	clone.ExecutedTrades = copyExecutedTrades(n.ExecutedTrades)
-	return &clone
+	return &Node{
+		ID:                         n.ID,
+		PublicKey:                  append(n.PublicKey[:0:0], n.PublicKey...),
+		PrivateKey:                 append(n.PrivateKey[:0:0], n.PrivateKey...),
+		Inventory:                  n.Inventory.Copy(),
+		Preferences:                copyFloatMap(n.Preferences),
+		PriceState:                 copyPriceState(n.PriceState),
+		PriceConfig:                n.PriceConfig,
+		Features:                   copyFeatures(n.Features),
+		TradeHistory:               copyTradeHistory(n.TradeHistory),
+		SettledVolume:              copyAmountMap(n.SettledVolume),
+		LastTradeUnix:              copyInt64Map(n.LastTradeUnix),
+		Flow:                       copyFlow(n.Flow),
+		Store:                      n.Store,
+		ExecutedTrades:             copyExecutedTrades(n.ExecutedTrades),
+		AllowEphemeralReplayUnsafe: n.AllowEphemeralReplayUnsafe,
+		NowUnix:                    n.NowUnix,
+	}
 }
 
 func commitPreparedState(dst *Node, prepared *Node) {
@@ -321,6 +346,42 @@ func rollbackInMemoryReplay(id model.TxID, nodes ...*Node) {
 	}
 }
 
+func requireDurableReplayGuard(seller *Node, buyer *Node) error {
+	if seller.Store != nil || buyer.Store != nil {
+		return nil
+	}
+	if seller.AllowEphemeralReplayUnsafe && buyer.AllowEphemeralReplayUnsafe {
+		return nil
+	}
+	return fmt.Errorf("signed trade execution requires durable replay store")
+}
+
+func lockTradeNodes(a *Node, b *Node) func() {
+	if a == b {
+		a.mu.Lock()
+		return func() { a.mu.Unlock() }
+	}
+	first, second := orderedNodes(a, b)
+	first.mu.Lock()
+	second.mu.Lock()
+	return func() {
+		second.mu.Unlock()
+		first.mu.Unlock()
+	}
+}
+
+func orderedNodes(a *Node, b *Node) (*Node, *Node) {
+	if cmp := bytes.Compare(a.ID[:], b.ID[:]); cmp < 0 {
+		return a, b
+	} else if cmp > 0 {
+		return b, a
+	}
+	if fmt.Sprintf("%p", a) < fmt.Sprintf("%p", b) {
+		return a, b
+	}
+	return b, a
+}
+
 func copyPriceState(in map[model.UnitID]price.PriceResult) map[model.UnitID]price.PriceResult {
 	out := make(map[model.UnitID]price.PriceResult, len(in))
 	for unit, result := range in {
@@ -341,6 +402,22 @@ func copyTradeHistory(in map[model.UnitID][]price.TradeObservation) map[model.Un
 	out := make(map[model.UnitID][]price.TradeObservation, len(in))
 	for unit, observations := range in {
 		out[unit] = append([]price.TradeObservation(nil), observations...)
+	}
+	return out
+}
+
+func copyFloatMap(in map[model.UnitID]float64) map[model.UnitID]float64 {
+	out := make(map[model.UnitID]float64, len(in))
+	for unit, value := range in {
+		out[unit] = value
+	}
+	return out
+}
+
+func copyFeatures(in map[model.UnitID]price.AssetFeatures) map[model.UnitID]price.AssetFeatures {
+	out := make(map[model.UnitID]price.AssetFeatures, len(in))
+	for unit, value := range in {
+		out[unit] = value
 	}
 	return out
 }

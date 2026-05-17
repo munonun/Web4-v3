@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"testing"
 
 	"web4-v3/core/crypto"
@@ -49,6 +50,45 @@ func TestStructuralIssueValidationDoesNotAuthorizeUnsignedIssue(t *testing.T) {
 	}
 }
 
+func TestApplyStructuralIssueTxAggregateOverflowReturnsError(t *testing.T) {
+	issuer := testNode(t)
+	owner := testNode(t)
+	unit := testUnit(t, issuer, "SKUG")
+	outputA := testValue(t, unit, Amount(math.MaxInt64), owner, 100)
+	outputB := testValue(t, unit, 1, owner, 101)
+	tx := IssueTx{
+		Unit:      unit,
+		Outputs:   []Value{outputA, outputB},
+		Issuer:    issuer,
+		Timestamp: 100,
+	}
+	tx.ID = mustIssueTxID(t, tx)
+
+	if err := ValidateStructuralIssueTx(&tx); err != nil {
+		t.Fatalf("structural issue should validate before aggregate apply: %v", err)
+	}
+	if _, err := ApplyStructuralIssueTx(NewInventoryState(), tx); err == nil {
+		t.Fatal("expected aggregate issue overflow error")
+	}
+}
+
+func TestStructuralIssueRejectsZeroOwner(t *testing.T) {
+	issuer := testNode(t)
+	unit := testUnit(t, issuer, "SKUG")
+	output := testValue(t, unit, 10, NodeID{}, 100)
+	tx := IssueTx{
+		Unit:      unit,
+		Outputs:   []Value{output},
+		Issuer:    issuer,
+		Timestamp: 100,
+	}
+	tx.ID = mustIssueTxID(t, tx)
+
+	if err := ValidateStructuralIssueTx(&tx); err == nil {
+		t.Fatal("expected zero issue output owner rejection")
+	}
+}
+
 func TestProtocolTradeTxPreservesValuePerUnit(t *testing.T) {
 	a := testNode(t)
 	b := testNode(t)
@@ -88,6 +128,73 @@ func TestProtocolTradeTxPreservesValuePerUnit(t *testing.T) {
 	}
 	if got := next.Get(b, web4); got != 0 {
 		t.Fatalf("party B WEB4 %d, want 0", got)
+	}
+}
+
+func TestApplyTradeTxAggregateOverflowReturnsError(t *testing.T) {
+	a := testNode(t)
+	b := testNode(t)
+	unit := testUnit(t, a, "SKUG")
+	input := testValue(t, unit, 1, a, 1)
+	output := testValue(t, unit, 1, b, 2)
+	tx := TradeTx{
+		InputsA:   []Value{input},
+		OutputsB:  []Value{output},
+		PartyA:    a,
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+	inv := NewInventoryState()
+	inv.Add(a, unit, 1)
+	inv.Add(b, unit, Amount(math.MaxInt64))
+
+	if err := ValidateTradeTx(&tx, inv); err != nil {
+		t.Fatalf("trade should validate before aggregate apply: %v", err)
+	}
+	if _, err := ApplyTradeTx(inv, tx); err == nil {
+		t.Fatal("expected aggregate trade output overflow error")
+	}
+}
+
+func TestProtocolTradeRejectsZeroParty(t *testing.T) {
+	b := testNode(t)
+	unit := testUnit(t, b, "SKUG")
+	input := testValue(t, unit, 1, NodeID{}, 1)
+	output := testValue(t, unit, 1, b, 2)
+	tx := TradeTx{
+		InputsA:   []Value{input},
+		OutputsB:  []Value{output},
+		PartyA:    NodeID{},
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+
+	if err := ValidateTradeTx(&tx, NewInventoryState()); err == nil {
+		t.Fatal("expected zero trade party rejection")
+	}
+}
+
+func TestProtocolTradeRejectsZeroOutputOwner(t *testing.T) {
+	a := testNode(t)
+	b := testNode(t)
+	unit := testUnit(t, a, "SKUG")
+	input := testValue(t, unit, 1, a, 1)
+	output := testValue(t, unit, 1, NodeID{}, 2)
+	tx := TradeTx{
+		InputsA:   []Value{input},
+		OutputsB:  []Value{output},
+		PartyA:    a,
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+	inv := NewInventoryState()
+	inv.Add(a, unit, 1)
+
+	if err := ValidateTradeTx(&tx, inv); err == nil {
+		t.Fatal("expected zero trade output owner rejection")
 	}
 }
 
@@ -165,6 +272,10 @@ func TestAcceptanceRecordBoundsAndPriceQuote(t *testing.T) {
 	if err := ValidateAcceptanceRecord(record); err == nil {
 		t.Fatal("expected out-of-range acceptance to fail")
 	}
+	record = AcceptanceRecord{Node: NodeID{}, TargetID: hashBytes(unit), Score: 0.7, Timestamp: 9}
+	if err := ValidateAcceptanceRecord(record); err == nil {
+		t.Fatal("expected zero acceptance node rejection")
+	}
 }
 
 func TestFlowRecordUpdates(t *testing.T) {
@@ -198,6 +309,14 @@ func TestTradeQuoteCorrectness(t *testing.T) {
 	quote = QuoteTrade(a, b, sell, buy, 0, 3)
 	if quote.Executable {
 		t.Fatal("expected zero sell amount to be non-executable")
+	}
+	quote = QuoteTrade(NodeID{}, b, sell, buy, 2, 3)
+	if quote.Executable {
+		t.Fatal("expected zero seller quote to be non-executable")
+	}
+	quote = QuoteTrade(a, NodeID{}, sell, buy, 2, 3)
+	if quote.Executable {
+		t.Fatal("expected zero buyer quote to be non-executable")
 	}
 }
 

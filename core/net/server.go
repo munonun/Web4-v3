@@ -76,7 +76,10 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		err = runtime.Serve(ctx)
 		_ = conn.Close()
 		if err != nil {
-			return err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			continue
 		}
 	}
 }

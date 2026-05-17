@@ -3,6 +3,7 @@ package node
 import (
 	"crypto/ed25519"
 	"fmt"
+	"sync"
 	"time"
 
 	"web4-v3/core/crypto"
@@ -11,6 +12,8 @@ import (
 )
 
 type Node struct {
+	mu sync.Mutex
+
 	ID model.NodeID
 
 	PublicKey  crypto.PublicKey
@@ -33,6 +36,10 @@ type Node struct {
 	Store Store
 
 	ExecutedTrades map[model.TxID]bool
+
+	// AllowEphemeralReplayUnsafe permits signed execution without durable replay
+	// storage. It is intended only for explicit tests and local simulations.
+	AllowEphemeralReplayUnsafe bool
 
 	NowUnix func() int64
 }
