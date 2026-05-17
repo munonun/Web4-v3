@@ -1,6 +1,11 @@
 package store_test
 
 import (
+	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"web4-v3/core/crypto"
@@ -152,6 +157,129 @@ func TestRejectReplay(t *testing.T) {
 	}
 }
 
+func TestJSONStoreConcurrentPersistExecutedTradeOnlyOneSucceeds(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{9, 9, 9}
+	const workers = 16
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- s.PersistExecutedTrade(id, node.AuthorizedTradeTx{})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	success := 0
+	for err := range results {
+		if err == nil {
+			success++
+		}
+	}
+	if success != 1 {
+		t.Fatalf("successful persists %d, want 1", success)
+	}
+	if !s.HasExecutedTrade(id) {
+		t.Fatal("winner did not write replay marker")
+	}
+}
+
+func TestJSONStoreExistingMarkerRejects(t *testing.T) {
+	s, err := store.NewJSONStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{4, 5, 6}
+	if err := s.MarkExecutedTrade(id); err != nil {
+		t.Fatalf("mark executed: %v", err)
+	}
+	if err := s.MarkExecutedTrade(id); err == nil {
+		t.Fatal("expected existing marker rejection")
+	}
+	if err := s.PersistExecutedTrade(id, node.AuthorizedTradeTx{}); err == nil {
+		t.Fatal("expected persist existing marker rejection")
+	}
+}
+
+func TestJSONStoreFailedTradePathDoesNotLeaveReplayMarker(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{7, 7, 7}
+	if err := os.Mkdir(tradePath(root, id), 0o755); err != nil {
+		t.Fatalf("make trade path dir: %v", err)
+	}
+	if err := s.PersistExecutedTrade(id, node.AuthorizedTradeTx{}); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if s.HasExecutedTrade(id) {
+		t.Fatal("failed persistence left replay marker")
+	}
+	reopened, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if reopened.HasExecutedTrade(id) {
+		t.Fatal("restart treated failed persistence as executed")
+	}
+}
+
+func TestJSONStoreRejectsSwappedNodeState(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	n1 := newStoredNode(t, s, 10)
+	n2 := newStoredNode(t, s, 10)
+	unit := testUnit(t, n1.ID, "SKUG")
+	n1.AddInventory(unit, model.FromFloat(5))
+	if err := s.SaveInventory(n1.ID, n1.Inventory); err != nil {
+		t.Fatalf("save inventory: %v", err)
+	}
+	data, err := os.ReadFile(inventoryPath(root, n1.ID))
+	if err != nil {
+		t.Fatalf("read inventory: %v", err)
+	}
+	if err := os.WriteFile(inventoryPath(root, n2.ID), data, 0o644); err != nil {
+		t.Fatalf("write swapped inventory: %v", err)
+	}
+	if _, err := s.LoadInventory(n2.ID); err == nil {
+		t.Fatal("expected swapped inventory rejection")
+	}
+}
+
+func TestJSONStoreMalformedStateReturnsError(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	n := newStoredNode(t, s, 10)
+	if err := os.WriteFile(inventoryPath(root, n.ID), []byte("{bad"), 0o644); err != nil {
+		t.Fatalf("write malformed inventory: %v", err)
+	}
+	if _, err := s.LoadInventory(n.ID); err == nil {
+		t.Fatal("expected malformed inventory error")
+	}
+	if err := os.WriteFile(inventoryPath(root, n.ID), nil, 0o644); err != nil {
+		t.Fatalf("write empty inventory: %v", err)
+	}
+	if _, err := s.LoadInventory(n.ID); err == nil {
+		t.Fatal("expected empty inventory error")
+	}
+}
+
 func storedTradeNodes(t *testing.T, s *store.JSONStore) (*node.Node, *node.Node, model.UnitID, model.UnitID) {
 	t.Helper()
 	seller := newStoredNode(t, s, 100)
@@ -212,4 +340,12 @@ func testUnit(t *testing.T, issuer model.NodeID, metadata string) model.UnitID {
 		t.Fatalf("unit id: %v", err)
 	}
 	return unit
+}
+
+func inventoryPath(root string, id model.NodeID) string {
+	return filepath.Join(root, "inventory", hex.EncodeToString(id[:])+".json")
+}
+
+func tradePath(root string, id model.TxID) string {
+	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".json")
 }

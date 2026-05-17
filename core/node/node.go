@@ -32,22 +32,25 @@ type Node struct {
 	Flow  map[model.UnitID]model.FlowRecord
 	Store Store
 
+	ExecutedTrades map[model.TxID]bool
+
 	NowUnix func() int64
 }
 
 func New(id model.NodeID) *Node {
 	n := &Node{
-		ID:            id,
-		Inventory:     model.NewInventoryState(),
-		Preferences:   make(map[model.UnitID]float64),
-		PriceState:    make(map[model.UnitID]price.PriceResult),
-		PriceConfig:   DefaultPriceConfig(),
-		Features:      make(map[model.UnitID]price.AssetFeatures),
-		TradeHistory:  make(map[model.UnitID][]price.TradeObservation),
-		SettledVolume: make(map[model.UnitID]model.Amount),
-		LastTradeUnix: make(map[model.UnitID]int64),
-		Flow:          make(map[model.UnitID]model.FlowRecord),
-		NowUnix:       func() int64 { return time.Now().Unix() },
+		ID:             id,
+		Inventory:      model.NewInventoryState(),
+		Preferences:    make(map[model.UnitID]float64),
+		PriceState:     make(map[model.UnitID]price.PriceResult),
+		PriceConfig:    DefaultPriceConfig(),
+		Features:       make(map[model.UnitID]price.AssetFeatures),
+		TradeHistory:   make(map[model.UnitID][]price.TradeObservation),
+		SettledVolume:  make(map[model.UnitID]model.Amount),
+		LastTradeUnix:  make(map[model.UnitID]int64),
+		Flow:           make(map[model.UnitID]model.FlowRecord),
+		ExecutedTrades: make(map[model.TxID]bool),
+		NowUnix:        func() int64 { return time.Now().Unix() },
 	}
 	return n
 }
@@ -134,6 +137,9 @@ func (n *Node) init() {
 	}
 	if n.Flow == nil {
 		n.Flow = make(map[model.UnitID]model.FlowRecord)
+	}
+	if n.ExecutedTrades == nil {
+		n.ExecutedTrades = make(map[model.TxID]bool)
 	}
 	if n.NowUnix == nil {
 		n.NowUnix = func() int64 { return time.Now().Unix() }

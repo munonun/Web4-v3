@@ -155,13 +155,45 @@ func intentMatchesQuote(intent node.TradeIntent, quote message.QuoteResponsePayl
 		intent.Timestamp == quote.ExpiryUnix
 }
 
-func quoteMatchesRequest(q message.QuoteResponsePayload, req message.QuoteRequestPayload) bool {
-	return q.RequestID == req.RequestID &&
-		q.Seller == req.Seller &&
-		q.Buyer == req.Buyer &&
-		q.SellUnit == req.SellUnit &&
-		q.BuyUnit == req.BuyUnit &&
-		q.SellAmount == req.SellAmount
+func validateQuoteMatchesRequest(q message.QuoteResponsePayload, req message.QuoteRequestPayload, nowUnix int64) error {
+	if q.RequestID != req.RequestID ||
+		q.Seller != req.Seller ||
+		q.Buyer != req.Buyer ||
+		q.SellUnit != req.SellUnit ||
+		q.BuyUnit != req.BuyUnit ||
+		q.SellAmount != req.SellAmount {
+		return fmt.Errorf("quote response does not match request")
+	}
+	if req.ExpiryUnix > 0 {
+		if nowUnix > req.ExpiryUnix {
+			return fmt.Errorf("quote request is expired")
+		}
+		if q.ExpiryUnix == 0 {
+			return fmt.Errorf("quote response removes request expiry")
+		}
+		if q.ExpiryUnix > req.ExpiryUnix {
+			return fmt.Errorf("quote response extends request expiry")
+		}
+	}
+	if q.ExpiryUnix > 0 && nowUnix > q.ExpiryUnix {
+		return fmt.Errorf("quote response is expired")
+	}
+	if req.SpreadLimit < 0 {
+		return fmt.Errorf("quote request spread limit is invalid")
+	}
+	if q.Executable {
+		if q.SellerAsk <= 0 || q.BuyerBid <= 0 {
+			return fmt.Errorf("executable quote prices must be greater than zero")
+		}
+		if q.BuyerBid < q.SellerAsk {
+			return fmt.Errorf("quote response bid is below ask")
+		}
+		spread := (q.BuyerBid - q.SellerAsk) / q.SellerAsk
+		if spread > req.SpreadLimit+quoteSpreadSlack() {
+			return fmt.Errorf("quote response exceeds request spread limit")
+		}
+	}
+	return nil
 }
 
 func selectIntents(intents []node.SignedTradeIntent, seller, buyer model.NodeID) (node.SignedTradeIntent, node.SignedTradeIntent, bool) {
@@ -213,6 +245,10 @@ func boolString(v bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func quoteSpreadSlack() float64 {
+	return 1.0 / float64(model.AmountScale)
 }
 
 func hashBytes[T ~[32]byte](h T) []byte {

@@ -69,6 +69,36 @@ func TestHandleMessageRejectsInvalidEnvelopeAndDuplicate(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedInvalidMessageReplayMarkedSeen(t *testing.T) {
+	local := testNode(t, 100)
+	peer := testNode(t, 100)
+	h := testHandler(t, local, peer)
+	payload := message.SignedIntentPayload{QuoteID: testTxID(44), Intent: node.SignedTradeIntent{}}
+	msg := signedMessage(t, peer.PrivateKey, message.TypeSignedIntent, payload, 10, testNonce(44))
+
+	if _, err := h.HandleMessage(msg, peer.PublicKey); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("first invalid message error %v, want ErrInvalidPayload", err)
+	}
+	if _, err := h.HandleMessage(msg, peer.PublicKey); !errors.Is(err, ErrDuplicateMessage) {
+		t.Fatalf("replayed invalid message error %v, want ErrDuplicateMessage", err)
+	}
+}
+
+func TestUnauthenticatedInvalidMessageNotMarkedSeen(t *testing.T) {
+	local := testNode(t, 100)
+	peer := testNode(t, 100)
+	h := testHandler(t, local, peer)
+	msg := signedMessage(t, peer.PrivateKey, message.TypePing, message.PingPayload{TimeUnix: 10}, 10, testNonce(45))
+	msg.Envelope.Timestamp = 0
+
+	if _, err := h.HandleMessage(msg, peer.PublicKey); !errors.Is(err, ErrInvalidPeer) {
+		t.Fatalf("invalid envelope error %v, want ErrInvalidPeer", err)
+	}
+	if h.Session.HasSeen(msg.Envelope.MessageID) {
+		t.Fatal("unauthenticated invalid message was marked seen")
+	}
+}
+
 func TestQuoteRequestReturnsSignedResponseWithoutExecution(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
 	h := testHandler(t, seller, buyer)
@@ -148,6 +178,86 @@ func TestQuoteResponseStoredAndExecutableReturnsSignedIntent(t *testing.T) {
 	payload := decodePayload[message.SignedIntentPayload](t, message.TypeSignedIntent, resp.PayloadBytes)
 	if payload.QuoteID != q.QuoteID || payload.Intent.Intent.Party != buyer.ID {
 		t.Fatalf("bad signed intent payload: %+v", payload)
+	}
+}
+
+func TestQuoteResponseConstraintViolationsRejected(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(req *message.QuoteRequestPayload, q *message.QuoteResponsePayload)
+	}{
+		{
+			name: "expiry extension",
+			mutate: func(req *message.QuoteRequestPayload, q *message.QuoteResponsePayload) {
+				req.ExpiryUnix = 100
+				q.ExpiryUnix = 101
+			},
+		},
+		{
+			name: "request expired",
+			mutate: func(req *message.QuoteRequestPayload, q *message.QuoteResponsePayload) {
+				req.ExpiryUnix = 99
+				q.ExpiryUnix = 99
+			},
+		},
+		{
+			name: "spread limit bypass",
+			mutate: func(req *message.QuoteRequestPayload, q *message.QuoteResponsePayload) {
+				req.SpreadLimit = 0
+				q.SellerAsk = 2
+				q.BuyerBid = 3
+			},
+		},
+		{
+			name: "mismatched quote id",
+			mutate: func(req *message.QuoteRequestPayload, q *message.QuoteResponsePayload) {
+				q.BuyAmount = model.FromFloat(3)
+			},
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+			h := testHandler(t, buyer, seller)
+			req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+			req.RequestID = testTxID(byte(60 + i))
+			q := executableQuoteResponse(t, seller, buyer, sellUnit, buyUnit, req.RequestID)
+			tc.mutate(&req, &q)
+			if tc.name != "mismatched quote id" {
+				setQuoteID(t, &q)
+			}
+			h.Session.PendingRequests[req.RequestID] = req
+			msg := signedMessage(t, seller.PrivateKey, message.TypeQuoteResponse, q, 10, testNonce(byte(60+i)))
+
+			resp, err := h.HandleMessage(msg, seller.PublicKey)
+			if err != nil {
+				t.Fatalf("handle quote response: %v", err)
+			}
+			if resp == nil || resp.Envelope.Type != message.TypeReject {
+				t.Fatalf("response %+v, want reject", resp)
+			}
+			if _, ok := h.Session.PendingQuotes[q.QuoteID]; ok {
+				t.Fatal("invalid quote response was stored")
+			}
+		})
+	}
+}
+
+func TestManuallyConstructedSessionInitializesMaps(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+	s := &Session{LocalID: seller.ID, PeerID: buyer.ID}
+	h, err := NewHandler(seller, s)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+	msg := signedMessage(t, buyer.PrivateKey, message.TypeQuoteRequest, req, 10, testNonce(73))
+	resp, err := h.HandleMessage(msg, buyer.PublicKey)
+	if err != nil {
+		t.Fatalf("handle quote request: %v", err)
+	}
+	if resp == nil || resp.Envelope.Type != message.TypeQuoteResponse {
+		t.Fatalf("response %+v, want quote response", resp)
 	}
 }
 
@@ -508,6 +618,15 @@ func executableQuoteResponse(t *testing.T, seller *node.Node, buyer *node.Node, 
 		t.Fatalf("quote response: %v", err)
 	}
 	return p
+}
+
+func setQuoteID(t *testing.T, p *message.QuoteResponsePayload) {
+	t.Helper()
+	id, err := quoteID(*p)
+	if err != nil {
+		t.Fatalf("quote id: %v", err)
+	}
+	p.QuoteID = id
 }
 
 func authorizedTradePayload(t *testing.T, seller *node.Node, buyer *node.Node, sellUnit model.UnitID, buyUnit model.UnitID) message.AuthorizedTradePayload {

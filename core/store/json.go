@@ -33,7 +33,7 @@ func (s *JSONStore) HasExecutedTrade(id model.TxID) bool {
 }
 
 func (s *JSONStore) MarkExecutedTrade(id model.TxID) error {
-	return writeJSONAtomic(s.executedPath(id), map[string]string{"id": idHex(id)})
+	return writeExecutedMarkerExclusive(s.executedPath(id), id)
 }
 
 func (s *JSONStore) SaveInventory(id model.NodeID, inv model.InventoryState) error {
@@ -43,6 +43,12 @@ func (s *JSONStore) SaveInventory(id model.NodeID, inv model.InventoryState) err
 func (s *JSONStore) LoadInventory(id model.NodeID) (model.InventoryState, error) {
 	var dto inventoryDTO
 	if err := readJSONIfExists(s.inventoryPath(id), &dto); err != nil {
+		return model.InventoryState{}, err
+	}
+	if dto.Node == "" && dto.Holdings == nil {
+		return model.NewInventoryState(), nil
+	}
+	if err := requireNodeMatch(dto.Node, id); err != nil {
 		return model.InventoryState{}, err
 	}
 	inv := model.NewInventoryState()
@@ -63,6 +69,12 @@ func (s *JSONStore) SaveFlow(id model.NodeID, flow map[model.UnitID]model.FlowRe
 func (s *JSONStore) LoadFlow(id model.NodeID) (map[model.UnitID]model.FlowRecord, error) {
 	var dto flowDTO
 	if err := readJSONIfExists(s.flowPath(id), &dto); err != nil {
+		return nil, err
+	}
+	if dto.Node == "" && dto.Records == nil {
+		return map[model.UnitID]model.FlowRecord{}, nil
+	}
+	if err := requireNodeMatch(dto.Node, id); err != nil {
 		return nil, err
 	}
 	out := make(map[model.UnitID]model.FlowRecord, len(dto.Records))
@@ -89,6 +101,12 @@ func (s *JSONStore) SavePriceState(id model.NodeID, state map[model.UnitID]price
 func (s *JSONStore) LoadPriceState(id model.NodeID) (map[model.UnitID]price.PriceResult, error) {
 	var dto priceDTO
 	if err := readJSONIfExists(s.pricePath(id), &dto); err != nil {
+		return nil, err
+	}
+	if dto.Node == "" && dto.Prices == nil {
+		return map[model.UnitID]price.PriceResult{}, nil
+	}
+	if err := requireNodeMatch(dto.Node, id); err != nil {
 		return nil, err
 	}
 	out := make(map[model.UnitID]price.PriceResult, len(dto.Prices))
@@ -121,18 +139,17 @@ func (s *JSONStore) LoadAuthorizedTrade(id model.TxID) (node.AuthorizedTradeTx, 
 	return tx, true
 }
 
-// PersistExecutedTrade stages every JSON document to a same-directory temp file
-// before committing the replay marker, authorized trade, and node state files.
-// A filesystem crash between renames can still leave a partial local commit;
-// because the replay marker is renamed first, recovery rejects the signed trade
-// instead of replaying it against possibly changed state.
+// PersistExecutedTrade stages every JSON document to a same-directory temp file,
+// commits trade and node state first, and creates the replay marker last with an
+// exclusive create. The JSON backend is still not crash-proof across all files:
+// a process crash before the final marker can leave staged state files that a
+// retry may overwrite, while a crash after the marker means the trade is final.
 func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeTx, states ...node.PersistedNodeState) error {
 	if s.HasExecutedTrade(id) {
 		return fmt.Errorf("trade replay rejected")
 	}
 
 	files := []atomicJSONFile{
-		{path: s.executedPath(id), value: map[string]string{"id": idHex(id)}},
 		{path: s.tradePath(id), value: tx},
 	}
 	for _, state := range states {
@@ -142,7 +159,25 @@ func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeT
 			atomicJSONFile{path: s.pricePath(state.ID), value: priceDTOFor(state.ID, state.PriceState)},
 		)
 	}
-	return writeJSONBatchAtomic(files)
+	reservation, err := reserveExecutedTrade(s.reservationPath(id), id)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if reservation != "" {
+			_ = os.Remove(reservation)
+		}
+	}()
+	batch, err := writeJSONBatchAtomic(files)
+	if err != nil {
+		return err
+	}
+	if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
+		batch.rollback()
+		return err
+	}
+	batch.cleanup()
+	return nil
 }
 
 func (s *JSONStore) Close() error {
@@ -155,6 +190,10 @@ func (s *JSONStore) executedPath(id model.TxID) string {
 
 func (s *JSONStore) tradePath(id model.TxID) string {
 	return filepath.Join(s.root, "trades", idHex(id)+".json")
+}
+
+func (s *JSONStore) reservationPath(id model.TxID) string {
+	return filepath.Join(s.root, "trades", idHex(id)+".executing")
 }
 
 func (s *JSONStore) inventoryPath(id model.NodeID) string {
@@ -226,8 +265,11 @@ type atomicJSONFile struct {
 }
 
 type stagedJSONFile struct {
-	path string
-	tmp  string
+	path      string
+	tmp       string
+	backup    string
+	hadBackup bool
+	installed bool
 }
 
 func writeJSONAtomic(path string, value any) error {
@@ -245,7 +287,75 @@ func writeJSONAtomic(path string, value any) error {
 	return os.Rename(tmp, path)
 }
 
-func writeJSONBatchAtomic(files []atomicJSONFile) error {
+func reserveExecutedTrade(path string, id model.TxID) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("trade execution already in progress")
+	}
+	if err != nil {
+		return "", err
+	}
+	data, err := json.MarshalIndent(map[string]string{"id": idHex(id), "state": "reserved"}, "", "  ")
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func writeExecutedMarkerExclusive(path string, id model.TxID) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("trade replay rejected")
+	}
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(map[string]string{"id": idHex(id)}, "", "  ")
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
+}
+
+func writeJSONBatchAtomic(files []atomicJSONFile) (*committedJSONBatch, error) {
 	staged := make([]stagedJSONFile, 0, len(files))
 	defer func() {
 		for _, file := range staged {
@@ -256,20 +366,109 @@ func writeJSONBatchAtomic(files []atomicJSONFile) error {
 	}()
 
 	for _, file := range files {
+		if err := preflightTarget(file.path); err != nil {
+			return nil, err
+		}
 		tmp, err := stageJSONFile(file.path, file.value)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		staged = append(staged, stagedJSONFile{path: file.path, tmp: tmp})
 	}
 
 	for i := range staged {
+		backup, hadBackup, err := moveExistingAside(staged[i].path)
+		if err != nil {
+			batch := &committedJSONBatch{files: staged}
+			batch.rollback()
+			return nil, err
+		}
+		staged[i].backup = backup
+		staged[i].hadBackup = hadBackup
 		if err := os.Rename(staged[i].tmp, staged[i].path); err != nil {
-			return err
+			batch := &committedJSONBatch{files: staged}
+			batch.rollback()
+			return nil, err
 		}
 		staged[i].tmp = ""
+		staged[i].installed = true
+	}
+	return &committedJSONBatch{files: staged}, nil
+}
+
+type committedJSONBatch struct {
+	files []stagedJSONFile
+}
+
+func (b *committedJSONBatch) rollback() {
+	if b == nil {
+		return
+	}
+	for i := len(b.files) - 1; i >= 0; i-- {
+		file := b.files[i]
+		if file.installed {
+			_ = os.Remove(file.path)
+		}
+		if file.hadBackup {
+			_ = os.Rename(file.backup, file.path)
+		}
+		if file.tmp != "" {
+			_ = os.Remove(file.tmp)
+		}
+	}
+}
+
+func (b *committedJSONBatch) cleanup() {
+	if b == nil {
+		return
+	}
+	for _, file := range b.files {
+		if file.hadBackup {
+			_ = os.Remove(file.backup)
+		}
+		if file.tmp != "" {
+			_ = os.Remove(file.tmp)
+		}
+	}
+}
+
+func preflightTarget(path string) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("target path is a directory: %s", path)
 	}
 	return nil
+}
+
+func moveExistingAside(path string) (string, bool, error) {
+	if err := preflightTarget(path); err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, err
+	}
+	backupFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.bak")
+	if err != nil {
+		return "", false, err
+	}
+	backup := backupFile.Name()
+	if err := backupFile.Close(); err != nil {
+		_ = os.Remove(backup)
+		return "", false, err
+	}
+	_ = os.Remove(backup)
+	if err := os.Rename(path, backup); err != nil {
+		return "", false, err
+	}
+	return backup, true, nil
 }
 
 func stageJSONFile(path string, value any) (string, error) {
@@ -306,9 +505,17 @@ func readJSONIfExists(path string, out any) error {
 		return err
 	}
 	if len(data) == 0 {
-		return nil
+		return fmt.Errorf("empty json file: %s", path)
 	}
 	return json.Unmarshal(data, out)
+}
+
+func requireNodeMatch(got string, id model.NodeID) error {
+	want := nodeHex(id)
+	if got != want {
+		return fmt.Errorf("node state id mismatch: got %q, want %q", got, want)
+	}
+	return nil
 }
 
 func nodeHex(id model.NodeID) string {

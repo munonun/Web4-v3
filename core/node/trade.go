@@ -118,6 +118,12 @@ func ExecuteSignedTrade(
 	if err != nil {
 		return nil, err
 	}
+	if seller.Store != nil && buyer.Store != nil && seller.Store != buyer.Store {
+		return nil, fmt.Errorf("split-store signed execution is not supported")
+	}
+	if err := rejectInMemoryReplay(seller, buyer, authID); err != nil {
+		return nil, err
+	}
 	if err := rejectReplayCheck(seller.Store, authID); err != nil {
 		return nil, err
 	}
@@ -135,7 +141,12 @@ func ExecuteSignedTrade(
 	if err != nil {
 		return nil, err
 	}
+	reserved, err := reserveInMemoryReplay(seller, buyer, authID)
+	if err != nil {
+		return nil, err
+	}
 	if err := persistSignedTrade(seller, buyer, authID, auth, nextSeller, nextBuyer); err != nil {
+		rollbackInMemoryReplay(authID, reserved...)
 		return nil, err
 	}
 	commitPreparedState(seller, nextSeller)
@@ -268,6 +279,7 @@ func cloneRuntimeState(n *Node) *Node {
 	clone.TradeHistory = copyTradeHistory(n.TradeHistory)
 	clone.SettledVolume = copyAmountMap(n.SettledVolume)
 	clone.LastTradeUnix = copyInt64Map(n.LastTradeUnix)
+	clone.ExecutedTrades = copyExecutedTrades(n.ExecutedTrades)
 	return &clone
 }
 
@@ -278,6 +290,35 @@ func commitPreparedState(dst *Node, prepared *Node) {
 	dst.TradeHistory = prepared.TradeHistory
 	dst.SettledVolume = prepared.SettledVolume
 	dst.LastTradeUnix = prepared.LastTradeUnix
+}
+
+func rejectInMemoryReplay(seller *Node, buyer *Node, id model.TxID) error {
+	if seller.ExecutedTrades[id] {
+		return fmt.Errorf("trade replay rejected")
+	}
+	if buyer != seller && buyer.ExecutedTrades[id] {
+		return fmt.Errorf("trade replay rejected")
+	}
+	return nil
+}
+
+func reserveInMemoryReplay(seller *Node, buyer *Node, id model.TxID) ([]*Node, error) {
+	if err := rejectInMemoryReplay(seller, buyer, id); err != nil {
+		return nil, err
+	}
+	seller.ExecutedTrades[id] = true
+	reserved := []*Node{seller}
+	if buyer != seller {
+		buyer.ExecutedTrades[id] = true
+		reserved = append(reserved, buyer)
+	}
+	return reserved, nil
+}
+
+func rollbackInMemoryReplay(id model.TxID, nodes ...*Node) {
+	for _, n := range nodes {
+		delete(n.ExecutedTrades, id)
+	}
 }
 
 func copyPriceState(in map[model.UnitID]price.PriceResult) map[model.UnitID]price.PriceResult {
@@ -316,6 +357,14 @@ func copyInt64Map(in map[model.UnitID]int64) map[model.UnitID]int64 {
 	out := make(map[model.UnitID]int64, len(in))
 	for unit, value := range in {
 		out[unit] = value
+	}
+	return out
+}
+
+func copyExecutedTrades(in map[model.TxID]bool) map[model.TxID]bool {
+	out := make(map[model.TxID]bool, len(in))
+	for id, executed := range in {
+		out[id] = executed
 	}
 	return out
 }

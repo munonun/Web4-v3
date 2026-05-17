@@ -372,6 +372,22 @@ func TestExecuteSignedTradeRejectsReplayFromStore(t *testing.T) {
 	}
 }
 
+func TestExecuteSignedTradeRejectsReplayWithoutStore(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("first signed trade: %v", err)
+	}
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected nil-store replay rejection")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(8) || buyer.Balance(buyUnit) != model.FromFloat(8) {
+		t.Fatalf("replay mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
 func TestSignedTradeReplayUsesStableAuthorizedTradeID(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	replayStore := newFakeStore()
@@ -433,6 +449,13 @@ func TestExecuteSignedTradePersistenceFailureDoesNotMutateRuntime(t *testing.T) 
 	if failing.markedCount != 0 {
 		t.Fatalf("replay mark happened despite failed persistence")
 	}
+	failing.failSaveInventory = false
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("retry after persistence failure: %v", err)
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(8) || buyer.Balance(buyUnit) != model.FromFloat(8) {
+		t.Fatalf("retry did not commit expected balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
 }
 
 func TestExecuteSignedTradePartialPersistenceRejectsReplay(t *testing.T) {
@@ -464,6 +487,26 @@ func TestExecuteSignedTradePartialPersistenceRejectsReplay(t *testing.T) {
 	}
 	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
 		t.Fatal("expected replay rejection after partial failure")
+	}
+}
+
+func TestExecuteSignedTradeRejectsSplitStoresBeforePersistence(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	sellerStore := newFakeStore()
+	buyerStore := newFakeStore()
+	seller.Store = sellerStore
+	buyer.Store = buyerStore
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected split-store rejection")
+	}
+	if sellerStore.markedCount != 0 || buyerStore.markedCount != 0 {
+		t.Fatalf("split-store rejection persisted seller=%d buyer=%d", sellerStore.markedCount, buyerStore.markedCount)
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("split-store rejection mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
 	}
 }
 

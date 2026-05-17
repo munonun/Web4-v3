@@ -27,6 +27,7 @@ func NewHandler(n *node.Node, s *Session) (*Handler, error) {
 	if s.LocalID != n.ID {
 		return nil, fmt.Errorf("%w: session local id mismatch", ErrInvalidState)
 	}
+	s.ensureMaps()
 	return &Handler{Node: n, Session: s}, nil
 }
 
@@ -43,6 +44,9 @@ func (h *Handler) HandleMessage(msg message.Message, peerPub crypto.PublicKey) (
 	if h.Session.HasSeen(msg.Envelope.MessageID) {
 		return nil, ErrDuplicateMessage
 	}
+	if err := h.Session.MarkSeen(msg.Envelope.MessageID); err != nil {
+		return nil, err
+	}
 
 	payload, err := message.DecodePayload(msg.Envelope.Type, msg.PayloadBytes)
 	if err != nil {
@@ -50,9 +54,6 @@ func (h *Handler) HandleMessage(msg message.Message, peerPub crypto.PublicKey) (
 	}
 	if err := message.ValidatePayloadSemantics(msg.Envelope.Type, payload); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
-	}
-	if err := h.Session.MarkSeen(msg.Envelope.MessageID); err != nil {
-		return nil, err
 	}
 	h.Session.LastSeenUnix = msg.Envelope.Timestamp
 
@@ -137,8 +138,15 @@ func (h *Handler) handleQuoteResponse(ref model.TxID, payload message.QuoteRespo
 	if !ok {
 		return h.reject(ref, "UNEXPECTED_QUOTE_RESPONSE", "quote response does not match a pending request")
 	}
-	if !quoteMatchesRequest(payload, request) {
-		return h.reject(ref, "QUOTE_MISMATCH", "quote response does not match request")
+	if err := validateQuoteMatchesRequest(payload, request, h.Node.NowUnix()); err != nil {
+		return h.reject(ref, "QUOTE_MISMATCH", err.Error())
+	}
+	expectedQuoteID, err := quoteID(payload)
+	if err != nil {
+		return nil, err
+	}
+	if expectedQuoteID != payload.QuoteID {
+		return h.reject(ref, "QUOTE_ID_MISMATCH", "quote id does not match quote response")
 	}
 	h.Session.PendingQuotes[payload.QuoteID] = payload
 	if !payload.Executable {
