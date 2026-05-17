@@ -41,6 +41,9 @@ func NewTransferTx(authorPriv crypto.PrivateKey, inputs []Value, outputs []Value
 	}
 	normalizedOutputs := normalizeTransferOutputExpiries(canonicalInputs, outputs)
 	for i := range normalizedOutputs {
+		if isZeroNodeID(normalizedOutputs[i].Owner) {
+			return nil, fmt.Errorf("output %d owner is required", i)
+		}
 		normalizedOutputs[i].Depth = nextDepth
 		id, err := ValueIDFor(normalizedOutputs[i])
 		if err != nil {

@@ -106,6 +106,9 @@ func ValidateTransferTx(tx *TransferTx, inputValues []Value) error {
 		if !validAmount(output.Amount) {
 			return fmt.Errorf("output %d amount must be greater than zero", i)
 		}
+		if isZeroNodeID(output.Owner) {
+			return fmt.Errorf("output %d owner is required", i)
+		}
 		if output.Depth != expectedDepth {
 			return fmt.Errorf("output %d depth mismatch", i)
 		}

@@ -33,7 +33,8 @@ func NewJSONStore(root string) (*JSONStore, error) {
 func (s *JSONStore) HasExecutedTrade(id model.TxID) bool {
 	return exists(s.executedPath(id)) ||
 		exists(s.committedPath(id)) ||
-		exists(s.reservationPath(id))
+		exists(s.reservationPath(id)) ||
+		exists(s.manifestPath(id))
 }
 
 func (s *JSONStore) MarkExecutedTrade(id model.TxID) error {
@@ -172,7 +173,22 @@ func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeT
 			_ = os.Remove(reservation)
 		}
 	}()
-	batch, err := writeJSONBatchAtomic(files)
+	manifestPath := s.manifestPath(id)
+	targets, err := relativeTargets(s.root, files)
+	if err != nil {
+		return err
+	}
+	if err := writeTransactionManifest(manifestPath, transactionManifest{ID: idHex(id), Phase: "preparing", Targets: targets}); err != nil {
+		return err
+	}
+	defer func() {
+		if manifestPath != "" {
+			_ = os.Remove(manifestPath)
+		}
+	}()
+	batch, err := writeJSONBatchAtomic(files, func(phase string) error {
+		return writeTransactionManifest(manifestPath, transactionManifest{ID: idHex(id), Phase: phase, Targets: targets})
+	})
 	if err != nil {
 		return err
 	}
@@ -185,6 +201,8 @@ func (s *JSONStore) PersistExecutedTrade(id model.TxID, tx node.AuthorizedTradeT
 	}
 	batch.cleanup()
 	_ = os.Remove(s.committedPath(id))
+	_ = os.Remove(manifestPath)
+	manifestPath = ""
 	return nil
 }
 
@@ -202,6 +220,10 @@ func (s *JSONStore) tradePath(id model.TxID) string {
 
 func (s *JSONStore) committedPath(id model.TxID) string {
 	return filepath.Join(s.root, "trades", idHex(id)+".committed.json")
+}
+
+func (s *JSONStore) manifestPath(id model.TxID) string {
+	return filepath.Join(s.root, "trades", idHex(id)+".txn.json")
 }
 
 func (s *JSONStore) reservationPath(id model.TxID) string {
@@ -240,6 +262,12 @@ type flowRecordDTO struct {
 type priceDTO struct {
 	Node   string                       `json:"node"`
 	Prices map[string]price.PriceResult `json:"prices"`
+}
+
+type transactionManifest struct {
+	ID      string   `json:"id"`
+	Phase   string   `json:"phase"`
+	Targets []string `json:"targets"`
 }
 
 func inventoryDTOFor(id model.NodeID, inv model.InventoryState) inventoryDTO {
@@ -377,7 +405,7 @@ func writeTradeRecordExclusive(path string, id model.TxID, state string) error {
 	return nil
 }
 
-func writeJSONBatchAtomic(files []atomicJSONFile) (*committedJSONBatch, error) {
+func writeJSONBatchAtomic(files []atomicJSONFile, phase func(string) error) (*committedJSONBatch, error) {
 	staged := make([]stagedJSONFile, 0, len(files))
 	defer func() {
 		for _, file := range staged {
@@ -398,6 +426,13 @@ func writeJSONBatchAtomic(files []atomicJSONFile) (*committedJSONBatch, error) {
 		staged = append(staged, stagedJSONFile{path: file.path, tmp: tmp})
 	}
 
+	if phase != nil {
+		if err := phase("applying"); err != nil {
+			batch := &committedJSONBatch{files: staged}
+			batch.rollback()
+			return nil, err
+		}
+	}
 	for i := range staged {
 		backup, hadBackup, err := moveExistingAside(staged[i].path)
 		if err != nil {
@@ -415,6 +450,13 @@ func writeJSONBatchAtomic(files []atomicJSONFile) (*committedJSONBatch, error) {
 		staged[i].tmp = ""
 		staged[i].installed = true
 		_ = fsyncDir(filepath.Dir(staged[i].path))
+	}
+	if phase != nil {
+		if err := phase("committed"); err != nil {
+			batch := &committedJSONBatch{files: staged}
+			batch.rollback()
+			return nil, err
+		}
 	}
 	return &committedJSONBatch{files: staged}, nil
 }
@@ -519,6 +561,59 @@ func stageJSONFile(path string, value any) (string, error) {
 	return tmp, nil
 }
 
+func relativeTargets(root string, files []atomicJSONFile) ([]string, error) {
+	targets := make([]string, 0, len(files))
+	for _, file := range files {
+		rel, err := filepath.Rel(root, file.path)
+		if err != nil {
+			return nil, err
+		}
+		if rel == "." || rel == ".." || len(rel) >= 3 && rel[:3] == "../" {
+			return nil, fmt.Errorf("transaction target escapes store root: %s", file.path)
+		}
+		targets = append(targets, filepath.ToSlash(rel))
+	}
+	return targets, nil
+}
+
+func writeTransactionManifest(path string, manifest transactionManifest) error {
+	return writeJSONAtomic(path, manifest)
+}
+
+func readTransactionManifest(path string) (transactionManifest, bool, error) {
+	var manifest transactionManifest
+	if !exists(path) {
+		return manifest, false, nil
+	}
+	if err := readJSONIfExists(path, &manifest); err != nil {
+		return transactionManifest{}, true, err
+	}
+	return manifest, true, nil
+}
+
+func (s *JSONStore) verifyTransactionManifest(id model.TxID, manifest transactionManifest) error {
+	if manifest.ID != idHex(id) {
+		return fmt.Errorf("transaction manifest id mismatch: got %q, want %q", manifest.ID, idHex(id))
+	}
+	if len(manifest.Targets) == 0 {
+		return fmt.Errorf("transaction manifest has no targets")
+	}
+	for _, target := range manifest.Targets {
+		path := filepath.Join(s.root, filepath.FromSlash(target))
+		rel, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == ".." || len(rel) >= 3 && rel[:3] == "../" {
+			return fmt.Errorf("transaction target escapes store root: %s", target)
+		}
+		if !exists(path) {
+			return fmt.Errorf("committed transaction target missing: %s", target)
+		}
+	}
+	return nil
+}
+
 func readJSONIfExists(path string, out any) error {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -550,21 +645,43 @@ func (s *JSONStore) recoverTransactions() error {
 		if exists(s.executedPath(id)) {
 			_ = os.Remove(s.committedPath(id))
 			_ = os.Remove(s.reservationPath(id))
+			_ = os.Remove(s.manifestPath(id))
 			continue
 		}
-		if exists(s.committedPath(id)) || (exists(s.reservationPath(id)) && exists(s.tradePath(id))) {
+		manifest, hasManifest, err := readTransactionManifest(s.manifestPath(id))
+		if err != nil {
+			return err
+		}
+		if exists(s.committedPath(id)) || (hasManifest && manifest.Phase == "committed") {
+			if hasManifest {
+				if err := s.verifyTransactionManifest(id, manifest); err != nil {
+					return err
+				}
+			}
 			if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
 				return err
 			}
 			_ = os.Remove(s.committedPath(id))
 			_ = os.Remove(s.reservationPath(id))
+			_ = os.Remove(s.manifestPath(id))
+			continue
+		}
+		if hasManifest {
+			switch manifest.Phase {
+			case "preparing":
+				continue
+			case "applying":
+				return fmt.Errorf("incomplete json transaction for trade %x", id[:])
+			default:
+				return fmt.Errorf("unknown json transaction phase %q for trade %x", manifest.Phase, id[:])
+			}
 		}
 	}
 	return nil
 }
 
 func tradeArtifactID(name string) (model.TxID, bool) {
-	for _, suffix := range []string{".committed.json", ".executing", ".json"} {
+	for _, suffix := range []string{".committed.json", ".executing", ".txn.json", ".json"} {
 		if !hasSuffix(name, suffix) {
 			continue
 		}

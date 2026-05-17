@@ -2,6 +2,7 @@ package node
 
 import (
 	"crypto/ed25519"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -316,6 +317,45 @@ func TestExecuteSignedTradeSucceeds(t *testing.T) {
 	}
 }
 
+func TestExecuteSignedTradeReceiveOverflowReturnsError(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer.Store = replayStore
+	seller.AddInventory(buyUnit, model.Amount(math.MaxInt64)-model.FromFloat(2)+1)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("ExecuteSignedTrade panicked on receive overflow: %v", r)
+		}
+	}()
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected receive overflow error")
+	}
+	if got := seller.Balance(buyUnit); got != model.Amount(math.MaxInt64)-model.FromFloat(2)+1 {
+		t.Fatalf("overflow failure mutated receive balance to %d", got)
+	}
+}
+
+func TestExecuteSignedTradeLargeSafeReceiveSucceeds(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer.Store = replayStore
+	seller.AddInventory(buyUnit, model.Amount(math.MaxInt64)-model.FromFloat(2))
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("safe receive should execute: %v", err)
+	}
+	if got := seller.Balance(buyUnit); got != model.Amount(math.MaxInt64) {
+		t.Fatalf("receive balance %d, want %d", got, model.Amount(math.MaxInt64))
+	}
+}
+
 func TestExecuteSignedTradeRejectsMissingAndMismatchedAuth(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
@@ -513,6 +553,49 @@ func TestExecuteSignedTradeConcurrentDifferentTradesNoCorruption(t *testing.T) {
 	}
 }
 
+func TestSignQuotePriceBalanceConcurrentWithSignedExecutionNoRace(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	replayStore := newFakeStore()
+	seller.Store = replayStore
+	buyer.Store = replayStore
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		<-start
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				_, _ = seller.SignQuote(q)
+				_ = seller.Price(sellUnit)
+				_ = seller.Balance(sellUnit)
+			}
+		}
+	}()
+	go func() {
+		<-start
+		_, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig)
+		errCh <- err
+	}()
+	close(start)
+
+	select {
+	case err := <-errCh:
+		close(done)
+		if err != nil {
+			t.Fatalf("execute signed trade: %v", err)
+		}
+	case <-time.After(time.Second):
+		close(done)
+		t.Fatal("concurrent quote/sign/read test deadlocked")
+	}
+}
+
 func TestSignedTradeReplayUsesStableAuthorizedTradeID(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	replayStore := newFakeStore()
@@ -632,6 +715,34 @@ func TestExecuteSignedTradeRejectsSplitStoresBeforePersistence(t *testing.T) {
 	}
 	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
 		t.Fatalf("split-store rejection mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeRejectsOneSidedAuthoritativeStore(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.Store = newFakeStore()
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected one-sided authoritative store rejection")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("one-sided rejection mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeWithPeerShadowAllowsOneSidedStore(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.Store = newFakeStore()
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	if _, err := ExecuteSignedTradeWithPeerShadow(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("peer-shadow signed execution: %v", err)
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(8) || buyer.Balance(buyUnit) != model.FromFloat(8) {
+		t.Fatalf("peer-shadow execution balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
 	}
 }
 

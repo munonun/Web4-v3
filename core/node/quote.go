@@ -32,6 +32,23 @@ func (n *Node) QuoteSell(
 	sellAmount model.Amount,
 	spread float64,
 ) Quote {
+	if buyer != nil {
+		unlock := lockTradeNodes(n, buyer)
+		defer unlock()
+		return n.quoteSellLocked(buyer, sellUnit, buyUnit, sellAmount, spread)
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.quoteSellLocked(nil, sellUnit, buyUnit, sellAmount, spread)
+}
+
+func (n *Node) quoteSellLocked(
+	buyer *Node,
+	sellUnit model.UnitID,
+	buyUnit model.UnitID,
+	sellAmount model.Amount,
+	spread float64,
+) Quote {
 	n.init()
 	if buyer != nil {
 		buyer.init()
@@ -56,14 +73,14 @@ func (n *Node) QuoteSell(
 		q.Reason = "sell amount must be greater than zero"
 		return q
 	}
-	if n.Balance(sellUnit) < sellAmount {
+	if n.balanceLocked(sellUnit) < sellAmount {
 		q.Reason = "seller has insufficient inventory"
 		return q
 	}
-	sellerSellPrice := n.effectivePrice(sellUnit)
-	sellerBuyPrice := n.effectivePrice(buyUnit)
-	buyerSellPrice := buyer.effectivePrice(sellUnit)
-	buyerBuyPrice := buyer.effectivePrice(buyUnit)
+	sellerSellPrice := n.effectivePriceLocked(sellUnit)
+	sellerBuyPrice := n.effectivePriceLocked(buyUnit)
+	buyerSellPrice := buyer.effectivePriceLocked(sellUnit)
+	buyerBuyPrice := buyer.effectivePriceLocked(buyUnit)
 	if sellerSellPrice <= 0 || sellerBuyPrice <= 0 {
 		q.Reason = "seller has no usable local price"
 		return q
@@ -89,7 +106,7 @@ func (n *Node) QuoteSell(
 		return q
 	}
 	q.BuyAmount = buyAmount
-	if buyer.Balance(buyUnit) < buyAmount {
+	if buyer.balanceLocked(buyUnit) < buyAmount {
 		q.Reason = "buyer has insufficient payment inventory"
 		return q
 	}
@@ -100,27 +117,33 @@ func (n *Node) QuoteSell(
 }
 
 func (n *Node) AcceptQuote(q Quote) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.acceptQuoteLocked(q)
+}
+
+func (n *Node) acceptQuoteLocked(q Quote) bool {
 	n.init()
 	if !q.Executable {
 		return false
 	}
 	switch n.ID {
 	case q.Seller:
-		if n.Balance(q.SellUnit) < q.SellAmount {
+		if n.balanceLocked(q.SellUnit) < q.SellAmount {
 			return false
 		}
-		sellPrice := n.effectivePrice(q.SellUnit)
-		buyPrice := n.effectivePrice(q.BuyUnit)
+		sellPrice := n.effectivePriceLocked(q.SellUnit)
+		buyPrice := n.effectivePriceLocked(q.BuyUnit)
 		if sellPrice <= 0 || buyPrice <= 0 {
 			return false
 		}
 		return model.ToFloat(q.BuyAmount)+roundingSlack() >= model.ToFloat(q.SellAmount)*(sellPrice/buyPrice)
 	case q.Buyer:
-		if n.Balance(q.BuyUnit) < q.BuyAmount {
+		if n.balanceLocked(q.BuyUnit) < q.BuyAmount {
 			return false
 		}
-		sellPrice := n.effectivePrice(q.SellUnit)
-		buyPrice := n.effectivePrice(q.BuyUnit)
+		sellPrice := n.effectivePriceLocked(q.SellUnit)
+		buyPrice := n.effectivePriceLocked(q.BuyUnit)
 		if sellPrice <= 0 || buyPrice <= 0 {
 			return false
 		}

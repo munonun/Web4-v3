@@ -202,6 +202,24 @@ func TestTransferWithZeroAmountOutputFails(t *testing.T) {
 	}
 }
 
+func TestNewTransferTxRejectsZeroOwnerOutput(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+
+	if _, err := NewTransferTx(ownerPriv, []Value{input}, []Value{transferOutput(input, NodeID{}, 100)}); err == nil {
+		t.Fatal("expected zero-owner output rejection")
+	}
+}
+
+func TestValidateTransferTxRejectsZeroOwnerOutput(t *testing.T) {
+	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
+	output := transferOutput(input, NodeID{}, 100)
+	tx := signedTransferWithOutputs(t, ownerPriv, []Value{input}, []Value{output})
+
+	if err := ValidateTransferTx(tx, []Value{input}); err == nil {
+		t.Fatal("expected zero-owner output validation rejection")
+	}
+}
+
 func TestTransferDuplicateInputValueRejected(t *testing.T) {
 	_, input, ownerPriv := mustIssueToOwner(t, 100, 0)
 	tx := TransferTx{

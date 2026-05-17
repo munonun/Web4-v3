@@ -103,6 +103,12 @@ func VerifyTradeIntent(sig SignedTradeIntent) bool {
 }
 
 func (n *Node) SignQuote(q Quote) (SignedTradeIntent, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.signQuoteLocked(q)
+}
+
+func (n *Node) signQuoteLocked(q Quote) (SignedTradeIntent, error) {
 	n.init()
 	if !q.Executable {
 		return SignedTradeIntent{}, quoteExecutionError(q)
@@ -116,7 +122,7 @@ func (n *Node) SignQuote(q Quote) (SignedTradeIntent, error) {
 	if q.Timestamp <= 0 {
 		return SignedTradeIntent{}, fmt.Errorf("quote timestamp must be greater than zero")
 	}
-	if !n.AcceptQuote(q) {
+	if !n.acceptQuoteLocked(q) {
 		return SignedTradeIntent{}, fmt.Errorf("node no longer accepts quote")
 	}
 	return SignTradeIntent(n.PrivateKey, IntentFromQuote(q, n.ID, q.Timestamp))

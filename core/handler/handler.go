@@ -222,7 +222,7 @@ func (h *Handler) handleAuthorizedTrade(payload message.AuthorizedTradePayload) 
 	}
 	quote := quoteFromResponse(quotePayload)
 	seller, buyer := h.executionParties(quote, auth)
-	_, err = node.ExecuteSignedTrade(seller, buyer, quote, auth.SellerAuth, auth.BuyerAuth)
+	_, err = node.ExecuteSignedTradeWithPeerShadow(seller, buyer, quote, auth.SellerAuth, auth.BuyerAuth)
 	status := message.TradeResultStatusAccepted
 	reason := "executed"
 	if err != nil {

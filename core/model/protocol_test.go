@@ -243,6 +243,74 @@ func TestProtocolTradeTxExactFixedPointConservation(t *testing.T) {
 	}
 }
 
+func TestValidateTradeTxRejectsAggregateInputOverspend(t *testing.T) {
+	a := testNode(t)
+	b := testNode(t)
+	unit := testUnit(t, a, "SKUG")
+	inputA := testValue(t, unit, 7, a, 1)
+	inputB := testValue(t, unit, 7, a, 2)
+	output := testValue(t, unit, 14, b, 3)
+	tx := TradeTx{
+		InputsA:   []Value{inputA, inputB},
+		OutputsB:  []Value{output},
+		PartyA:    a,
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+	inv := NewInventoryState()
+	inv.Add(a, unit, 10)
+
+	if err := ValidateTradeTx(&tx, inv); err == nil {
+		t.Fatal("expected aggregate input overspend rejection")
+	}
+}
+
+func TestValidateTradeTxAcceptsValidAggregateSpend(t *testing.T) {
+	a := testNode(t)
+	b := testNode(t)
+	unit := testUnit(t, a, "SKUG")
+	inputA := testValue(t, unit, 4, a, 1)
+	inputB := testValue(t, unit, 6, a, 2)
+	output := testValue(t, unit, 10, b, 3)
+	tx := TradeTx{
+		InputsA:   []Value{inputA, inputB},
+		OutputsB:  []Value{output},
+		PartyA:    a,
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+	inv := NewInventoryState()
+	inv.Add(a, unit, 10)
+
+	if err := ValidateTradeTx(&tx, inv); err != nil {
+		t.Fatalf("valid aggregate spend rejected: %v", err)
+	}
+}
+
+func TestValidateTradeTxAggregateInputOverflowReturnsError(t *testing.T) {
+	a := testNode(t)
+	b := testNode(t)
+	unit := testUnit(t, a, "SKUG")
+	inputA := testValue(t, unit, Amount(math.MaxInt64), a, 1)
+	inputB := testValue(t, unit, 1, a, 2)
+	outputA := testValue(t, unit, Amount(math.MaxInt64), b, 3)
+	outputB := testValue(t, unit, 1, b, 4)
+	tx := TradeTx{
+		InputsA:   []Value{inputA, inputB},
+		OutputsB:  []Value{outputA, outputB},
+		PartyA:    a,
+		PartyB:    b,
+		Timestamp: 10,
+	}
+	tx.ID = mustTradeTxID(t, tx)
+
+	if err := ValidateTradeTx(&tx, NewInventoryState()); err == nil {
+		t.Fatal("expected aggregate input overflow error")
+	}
+}
+
 func TestProtocolInventoryNeverNegative(t *testing.T) {
 	node := testNode(t)
 	unit := testUnit(t, node, "SKUG")
@@ -289,6 +357,86 @@ func TestFlowRecordUpdates(t *testing.T) {
 
 	if flow.TradeVolume != 4 || flow.PaymentVolume != 2 || flow.Consumption != 1 || flow.DemandFulfilled != 3 {
 		t.Fatalf("bad flow record: %+v", flow)
+	}
+}
+
+func TestFlowRecordCheckedUpdatesRejectOverflow(t *testing.T) {
+	unit := testUnit(t, testNode(t), "SKUG")
+	cases := []struct {
+		name string
+		flow FlowRecord
+		add  func(*FlowRecord) error
+	}{
+		{
+			name: "trade",
+			flow: FlowRecord{Unit: unit, TradeVolume: Amount(math.MaxInt64)},
+			add:  func(f *FlowRecord) error { return f.AddTradeChecked(1) },
+		},
+		{
+			name: "payment",
+			flow: FlowRecord{Unit: unit, PaymentVolume: Amount(math.MaxInt64)},
+			add:  func(f *FlowRecord) error { return f.AddPaymentChecked(1) },
+		},
+		{
+			name: "consumption",
+			flow: FlowRecord{Unit: unit, Consumption: Amount(math.MaxInt64)},
+			add:  func(f *FlowRecord) error { return f.AddConsumptionChecked(1) },
+		},
+		{
+			name: "demand",
+			flow: FlowRecord{Unit: unit, DemandFulfilled: Amount(math.MaxInt64)},
+			add:  func(f *FlowRecord) error { return f.AddDemandFulfilledChecked(1) },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.add(&tc.flow); err == nil {
+				t.Fatal("expected overflow error")
+			}
+		})
+	}
+
+	flow := FlowRecord{Unit: unit}
+	if err := flow.AddTradeChecked(4); err != nil {
+		t.Fatalf("add trade: %v", err)
+	}
+	if err := flow.AddPaymentChecked(2); err != nil {
+		t.Fatalf("add payment: %v", err)
+	}
+	if err := flow.AddConsumptionChecked(1); err != nil {
+		t.Fatalf("add consumption: %v", err)
+	}
+	if err := flow.AddDemandFulfilledChecked(3); err != nil {
+		t.Fatalf("add demand: %v", err)
+	}
+	if flow.TradeVolume != 4 || flow.PaymentVolume != 2 || flow.Consumption != 1 || flow.DemandFulfilled != 3 {
+		t.Fatalf("bad checked flow record: %+v", flow)
+	}
+}
+
+func TestFlowRecordConvenienceUpdatesDoNotPanicOnOverflow(t *testing.T) {
+	unit := testUnit(t, testNode(t), "SKUG")
+	flow := FlowRecord{
+		Unit:            unit,
+		TradeVolume:     Amount(math.MaxInt64),
+		PaymentVolume:   Amount(math.MaxInt64),
+		Consumption:     Amount(math.MaxInt64),
+		DemandFulfilled: Amount(math.MaxInt64),
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("convenience flow update panicked: %v", r)
+		}
+	}()
+	flow.AddTrade(1)
+	flow.AddPayment(1)
+	flow.AddConsumption(1)
+	flow.AddDemandFulfilled(1)
+	if flow.TradeVolume != Amount(math.MaxInt64) ||
+		flow.PaymentVolume != Amount(math.MaxInt64) ||
+		flow.Consumption != Amount(math.MaxInt64) ||
+		flow.DemandFulfilled != Amount(math.MaxInt64) {
+		t.Fatalf("overflowing convenience update mutated flow: %+v", flow)
 	}
 }
 

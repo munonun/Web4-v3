@@ -9,7 +9,13 @@ import (
 )
 
 func (n *Node) ComputePrice(unit model.UnitID) price.PriceResult {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.init()
+	return n.computePriceLocked(unit)
+}
+
+func (n *Node) computePriceLocked(unit model.UnitID) price.PriceResult {
 	result := price.ComputePrice(
 		n.Features[unit],
 		n.TradeHistory[unit],
@@ -23,22 +29,45 @@ func (n *Node) ComputePrice(unit model.UnitID) price.PriceResult {
 }
 
 func (n *Node) Price(unit model.UnitID) float64 {
+	n.mu.RLock()
+	if result, ok := n.PriceState[unit]; ok {
+		n.mu.RUnlock()
+		return result.FinalPrice
+	}
+	n.mu.RUnlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.init()
 	if result, ok := n.PriceState[unit]; ok {
 		return result.FinalPrice
 	}
-	return n.ComputePrice(unit).FinalPrice
+	return n.computePriceLocked(unit).FinalPrice
 }
 
 func (n *Node) RefreshPrices() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.init()
-	for _, unit := range n.units() {
-		n.ComputePrice(unit)
+	for _, unit := range n.unitsLocked() {
+		n.computePriceLocked(unit)
 	}
 }
 
 func (n *Node) effectivePrice(unit model.UnitID) float64 {
-	price := n.Price(unit)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.init()
+	return n.effectivePriceLocked(unit)
+}
+
+func (n *Node) effectivePriceLocked(unit model.UnitID) float64 {
+	result, ok := n.PriceState[unit]
+	finalPrice := 0.0
+	if ok {
+		finalPrice = result.FinalPrice
+	} else {
+		finalPrice = n.computePriceLocked(unit).FinalPrice
+	}
 	utility := 1.0
 	if n.Preferences != nil {
 		if u, ok := n.Preferences[unit]; ok {
@@ -48,10 +77,16 @@ func (n *Node) effectivePrice(unit model.UnitID) float64 {
 	if utility <= 0 {
 		return 0
 	}
-	return price * utility
+	return finalPrice * utility
 }
 
 func (n *Node) units() []model.UnitID {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.unitsLocked()
+}
+
+func (n *Node) unitsLocked() []model.UnitID {
 	seen := make(map[model.UnitID]struct{})
 	if n.Inventory.Holdings[n.ID] != nil {
 		for unit := range n.Inventory.Holdings[n.ID] {

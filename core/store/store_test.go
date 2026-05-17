@@ -134,8 +134,12 @@ func TestJSONStoreRecoveryCompletesMarkerAfterStateTradeCrash(t *testing.T) {
 	if err := os.Remove(executedPath(root, authID)); err != nil {
 		t.Fatalf("simulate missing marker: %v", err)
 	}
+	writeTxnManifest(t, root, authID, "committed", executionTargets(root, authID, seller.ID, buyer.ID))
 	if err := os.WriteFile(reservationPath(root, authID), []byte("executing"), 0o600); err != nil {
 		t.Fatalf("simulate executing record: %v", err)
+	}
+	if err := os.WriteFile(committedPath(root, authID), []byte(fmt.Sprintf(`{"id":"%x","state":"committed"}`, authID[:])), 0o600); err != nil {
+		t.Fatalf("simulate committed record: %v", err)
 	}
 
 	recovered, err := store.NewJSONStore(root)
@@ -214,6 +218,53 @@ func TestJSONStoreSaveAuthorizedTradeDoesNotMarkExecuted(t *testing.T) {
 	}
 	if reopened.HasExecutedTrade(id) {
 		t.Fatal("saved authorized trade was treated as executed")
+	}
+}
+
+func TestJSONStorePendingAuthorizedTradeWithReservationDoesNotBecomeExecuted(t *testing.T) {
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{8, 8, 8}
+	if err := s.SaveAuthorizedTrade(id, node.AuthorizedTradeTx{}); err != nil {
+		t.Fatalf("save authorized trade: %v", err)
+	}
+	if err := os.WriteFile(reservationPath(root, id), []byte("executing"), 0o600); err != nil {
+		t.Fatalf("write reservation: %v", err)
+	}
+	reopened, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	if _, err := os.Stat(executedPath(root, id)); !os.IsNotExist(err) {
+		t.Fatalf("pending trade became executed marker, stat err=%v", err)
+	}
+	if !reopened.HasExecutedTrade(id) {
+		t.Fatal("incomplete reservation should fail closed and block execution")
+	}
+}
+
+func TestJSONStoreApplyingTransactionFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	if _, err := store.NewJSONStore(root); err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	id := model.TxID{9, 8, 7}
+	if err := os.WriteFile(reservationPath(root, id), []byte("executing"), 0o600); err != nil {
+		t.Fatalf("write reservation: %v", err)
+	}
+	if err := os.WriteFile(tradePath(root, id), []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write partial trade: %v", err)
+	}
+	writeTxnManifest(t, root, id, "applying", []string{
+		filepath.ToSlash(filepath.Join("trades", fmt.Sprintf("%x", id[:])+".json")),
+		filepath.ToSlash(filepath.Join("inventory", "missing.json")),
+	})
+
+	if _, err := store.NewJSONStore(root); err == nil {
+		t.Fatal("expected incomplete applying transaction to fail closed")
 	}
 }
 
@@ -430,4 +481,51 @@ func executedPath(root string, id model.TxID) string {
 
 func reservationPath(root string, id model.TxID) string {
 	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".executing")
+}
+
+func committedPath(root string, id model.TxID) string {
+	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".committed.json")
+}
+
+func manifestPath(root string, id model.TxID) string {
+	return filepath.Join(root, "trades", fmt.Sprintf("%x", id[:])+".txn.json")
+}
+
+func flowPath(root string, id model.NodeID) string {
+	return filepath.Join(root, "flow", hex.EncodeToString(id[:])+".json")
+}
+
+func pricePath(root string, id model.NodeID) string {
+	return filepath.Join(root, "prices", hex.EncodeToString(id[:])+".json")
+}
+
+func executionTargets(root string, tradeID model.TxID, nodes ...model.NodeID) []string {
+	paths := []string{tradePath(root, tradeID)}
+	for _, id := range nodes {
+		paths = append(paths, inventoryPath(root, id), flowPath(root, id), pricePath(root, id))
+	}
+	targets := make([]string, 0, len(paths))
+	for _, path := range paths {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			panic(err)
+		}
+		targets = append(targets, filepath.ToSlash(rel))
+	}
+	return targets
+}
+
+func writeTxnManifest(t *testing.T, root string, id model.TxID, phase string, targets []string) {
+	t.Helper()
+	data := []byte(fmt.Sprintf(`{"id":"%x","phase":"%s","targets":[`, id[:], phase))
+	for i, target := range targets {
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, fmt.Sprintf("%q", target)...)
+	}
+	data = append(data, []byte(`]}`)...)
+	if err := os.WriteFile(manifestPath(root, id), data, 0o600); err != nil {
+		t.Fatalf("write txn manifest: %v", err)
+	}
 }

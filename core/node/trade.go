@@ -27,10 +27,10 @@ func ExecuteTrade(seller *Node, buyer *Node, q Quote) (*model.TradeTx, error) {
 	if seller.ID != q.Seller || buyer.ID != q.Buyer {
 		return nil, fmt.Errorf("quote parties do not match nodes")
 	}
-	if !seller.AcceptQuote(q) {
+	if !seller.acceptQuoteLocked(q) {
 		return nil, fmt.Errorf("seller rejected quote")
 	}
-	if !buyer.AcceptQuote(q) {
+	if !buyer.acceptQuoteLocked(q) {
 		return nil, fmt.Errorf("buyer rejected quote")
 	}
 
@@ -44,20 +44,12 @@ func ExecuteTrade(seller *Node, buyer *Node, q Quote) (*model.TradeTx, error) {
 		return nil, err
 	}
 
-	nextSeller := seller.Inventory.Copy()
-	nextBuyer := buyer.Inventory.Copy()
-	if err := nextSeller.Sub(seller.ID, q.SellUnit, q.SellAmount); err != nil {
+	nextSeller, nextBuyer, err := preparedTradeState(seller, buyer, q, now)
+	if err != nil {
 		return nil, err
 	}
-	nextSeller.Add(seller.ID, q.BuyUnit, q.BuyAmount)
-	if err := nextBuyer.Sub(buyer.ID, q.BuyUnit, q.BuyAmount); err != nil {
-		return nil, err
-	}
-	nextBuyer.Add(buyer.ID, q.SellUnit, q.SellAmount)
-
-	seller.Inventory = nextSeller
-	buyer.Inventory = nextBuyer
-	recordSuccessfulTrade(seller, buyer, q, now)
+	commitPreparedState(seller, nextSeller)
+	commitPreparedState(buyer, nextBuyer)
 	return tx, nil
 }
 
@@ -67,6 +59,31 @@ func ExecuteSignedTrade(
 	q Quote,
 	sellerSig SignedTradeIntent,
 	buyerSig SignedTradeIntent,
+) (*model.TradeTx, error) {
+	return executeSignedTrade(seller, buyer, q, sellerSig, buyerSig, false)
+}
+
+// ExecuteSignedTradeWithPeerShadow executes a signed trade where exactly one
+// party is the local durable node and the other is an ephemeral peer shadow.
+// It is intended for handler/session execution after counterparty and
+// negotiation-state checks have already bound the peer.
+func ExecuteSignedTradeWithPeerShadow(
+	seller *Node,
+	buyer *Node,
+	q Quote,
+	sellerSig SignedTradeIntent,
+	buyerSig SignedTradeIntent,
+) (*model.TradeTx, error) {
+	return executeSignedTrade(seller, buyer, q, sellerSig, buyerSig, true)
+}
+
+func executeSignedTrade(
+	seller *Node,
+	buyer *Node,
+	q Quote,
+	sellerSig SignedTradeIntent,
+	buyerSig SignedTradeIntent,
+	allowPeerShadow bool,
 ) (*model.TradeTx, error) {
 	if seller == nil || buyer == nil {
 		return nil, fmt.Errorf("seller and buyer are required")
@@ -114,13 +131,13 @@ func ExecuteSignedTrade(
 		return nil, fmt.Errorf("authorizations do not sign the same terms")
 	}
 
-	if err := requireDurableReplayGuard(seller, buyer); err != nil {
+	if err := requireDurableReplayGuard(seller, buyer, allowPeerShadow); err != nil {
 		return nil, err
 	}
-	if !seller.AcceptQuote(q) {
+	if !seller.acceptQuoteLocked(q) {
 		return nil, fmt.Errorf("seller rejected quote")
 	}
-	if !buyer.AcceptQuote(q) {
+	if !buyer.acceptQuoteLocked(q) {
 		return nil, fmt.Errorf("buyer rejected quote")
 	}
 
@@ -217,28 +234,53 @@ func tradeValue(unit model.UnitID, amount model.Amount, owner model.NodeID, crea
 func combinedInventory(a *Node, b *Node) model.InventoryState {
 	out := model.NewInventoryState()
 	for unit, amount := range a.Inventory.Holdings[a.ID] {
-		out.Add(a.ID, unit, amount)
+		if err := out.AddChecked(a.ID, unit, amount); err != nil {
+			panic(err)
+		}
 	}
 	for unit, amount := range b.Inventory.Holdings[b.ID] {
-		out.Add(b.ID, unit, amount)
+		if err := out.AddChecked(b.ID, unit, amount); err != nil {
+			panic(err)
+		}
 	}
 	return out
 }
 
-func recordSuccessfulTrade(seller *Node, buyer *Node, q Quote, now int64) {
-	seller.recordTradeFlow(q.SellUnit, q.SellAmount)
-	buyer.recordTradeFlow(q.SellUnit, q.SellAmount)
-	seller.recordTradeFlow(q.BuyUnit, q.BuyAmount)
-	buyer.recordTradeFlow(q.BuyUnit, q.BuyAmount)
-	seller.recordPaymentFlow(q.BuyUnit, q.BuyAmount)
-	buyer.recordPaymentFlow(q.BuyUnit, q.BuyAmount)
+func recordSuccessfulTrade(seller *Node, buyer *Node, q Quote, now int64) error {
+	if err := seller.recordTradeFlow(q.SellUnit, q.SellAmount); err != nil {
+		return fmt.Errorf("seller trade flow overflow: %w", err)
+	}
+	if err := buyer.recordTradeFlow(q.SellUnit, q.SellAmount); err != nil {
+		return fmt.Errorf("buyer trade flow overflow: %w", err)
+	}
+	if err := seller.recordTradeFlow(q.BuyUnit, q.BuyAmount); err != nil {
+		return fmt.Errorf("seller buy-unit trade flow overflow: %w", err)
+	}
+	if err := buyer.recordTradeFlow(q.BuyUnit, q.BuyAmount); err != nil {
+		return fmt.Errorf("buyer buy-unit trade flow overflow: %w", err)
+	}
+	if err := seller.recordPaymentFlow(q.BuyUnit, q.BuyAmount); err != nil {
+		return fmt.Errorf("seller payment flow overflow: %w", err)
+	}
+	if err := buyer.recordPaymentFlow(q.BuyUnit, q.BuyAmount); err != nil {
+		return fmt.Errorf("buyer payment flow overflow: %w", err)
+	}
 
 	sellUnitPrice := model.ToFloat(q.BuyAmount) / model.ToFloat(q.SellAmount)
 	buyUnitPrice := model.ToFloat(q.SellAmount) / model.ToFloat(q.BuyAmount)
-	seller.recordObservation(q.SellUnit, sellUnitPrice, q.SellAmount, now)
-	buyer.recordObservation(q.SellUnit, sellUnitPrice, q.SellAmount, now)
-	seller.recordObservation(q.BuyUnit, buyUnitPrice, q.BuyAmount, now)
-	buyer.recordObservation(q.BuyUnit, buyUnitPrice, q.BuyAmount, now)
+	if err := seller.recordObservation(q.SellUnit, sellUnitPrice, q.SellAmount, now); err != nil {
+		return fmt.Errorf("seller sell-unit observation overflow: %w", err)
+	}
+	if err := buyer.recordObservation(q.SellUnit, sellUnitPrice, q.SellAmount, now); err != nil {
+		return fmt.Errorf("buyer sell-unit observation overflow: %w", err)
+	}
+	if err := seller.recordObservation(q.BuyUnit, buyUnitPrice, q.BuyAmount, now); err != nil {
+		return fmt.Errorf("seller buy-unit observation overflow: %w", err)
+	}
+	if err := buyer.recordObservation(q.BuyUnit, buyUnitPrice, q.BuyAmount, now); err != nil {
+		return fmt.Errorf("buyer buy-unit observation overflow: %w", err)
+	}
+	return nil
 }
 
 func preparedTradeState(seller *Node, buyer *Node, q Quote, now int64) (*Node, *Node, error) {
@@ -247,12 +289,18 @@ func preparedTradeState(seller *Node, buyer *Node, q Quote, now int64) (*Node, *
 	if err := nextSeller.Inventory.Sub(seller.ID, q.SellUnit, q.SellAmount); err != nil {
 		return nil, nil, err
 	}
-	nextSeller.Inventory.Add(seller.ID, q.BuyUnit, q.BuyAmount)
+	if err := nextSeller.Inventory.AddChecked(seller.ID, q.BuyUnit, q.BuyAmount); err != nil {
+		return nil, nil, fmt.Errorf("seller receive inventory overflow: %w", err)
+	}
 	if err := nextBuyer.Inventory.Sub(buyer.ID, q.BuyUnit, q.BuyAmount); err != nil {
 		return nil, nil, err
 	}
-	nextBuyer.Inventory.Add(buyer.ID, q.SellUnit, q.SellAmount)
-	recordSuccessfulTrade(nextSeller, nextBuyer, q, now)
+	if err := nextBuyer.Inventory.AddChecked(buyer.ID, q.SellUnit, q.SellAmount); err != nil {
+		return nil, nil, fmt.Errorf("buyer receive inventory overflow: %w", err)
+	}
+	if err := recordSuccessfulTrade(nextSeller, nextBuyer, q, now); err != nil {
+		return nil, nil, err
+	}
 	return nextSeller, nextBuyer, nil
 }
 
@@ -346,9 +394,15 @@ func rollbackInMemoryReplay(id model.TxID, nodes ...*Node) {
 	}
 }
 
-func requireDurableReplayGuard(seller *Node, buyer *Node) error {
-	if seller.Store != nil || buyer.Store != nil {
+func requireDurableReplayGuard(seller *Node, buyer *Node, allowPeerShadow bool) error {
+	if seller.Store != nil && buyer.Store != nil {
 		return nil
+	}
+	if seller.Store != nil || buyer.Store != nil {
+		if allowPeerShadow {
+			return nil
+		}
+		return fmt.Errorf("one-sided store signed execution requires explicit peer-shadow execution")
 	}
 	if seller.AllowEphemeralReplayUnsafe && buyer.AllowEphemeralReplayUnsafe {
 		return nil

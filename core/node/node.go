@@ -12,7 +12,7 @@ import (
 )
 
 type Node struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	ID model.NodeID
 

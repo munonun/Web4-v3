@@ -281,14 +281,27 @@ func ValidateTradeTx(tx *TradeTx, inv InventoryState) error {
 	if tx.ID != expectedTxID {
 		return fmt.Errorf("trade tx id mismatch")
 	}
-	for _, input := range tx.InputsA {
-		if inv.Get(tx.PartyA, input.Unit) < input.Amount {
-			return fmt.Errorf("party A input does not exist in inventory")
-		}
+	if err := checkTradeInventoryCoverage(inv, tx.PartyA, tx.InputsA, "party A"); err != nil {
+		return err
 	}
-	for _, input := range tx.InputsB {
-		if inv.Get(tx.PartyB, input.Unit) < input.Amount {
-			return fmt.Errorf("party B input does not exist in inventory")
+	if err := checkTradeInventoryCoverage(inv, tx.PartyB, tx.InputsB, "party B"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func checkTradeInventoryCoverage(inv InventoryState, party NodeID, inputs []Value, label string) error {
+	required := make(map[UnitID]Amount)
+	for i, input := range inputs {
+		next, err := CheckedAdd(required[input.Unit], input.Amount)
+		if err != nil {
+			return fmt.Errorf("%s input %d amount overflow", label, i)
+		}
+		required[input.Unit] = next
+	}
+	for unit, amount := range required {
+		if inv.Get(party, unit) < amount {
+			return fmt.Errorf("%s input does not exist in inventory", label)
 		}
 	}
 	return nil
@@ -389,28 +402,76 @@ func PriceQuoteFromAcceptance(record AcceptanceRecord, unit UnitID) PriceQuote {
 	}
 }
 
+// AddTrade records positive trade volume and ignores invalid or overflowing
+// updates. Use AddTradeChecked when callers need the overflow error.
 func (f *FlowRecord) AddTrade(amount Amount) {
-	if validFlowAmount(amount) {
-		f.TradeVolume = Add(f.TradeVolume, amount)
-	}
+	_ = f.AddTradeChecked(amount)
 }
 
+// AddPayment records positive payment volume and ignores invalid or
+// overflowing updates. Use AddPaymentChecked when callers need the error.
 func (f *FlowRecord) AddPayment(amount Amount) {
-	if validFlowAmount(amount) {
-		f.PaymentVolume = Add(f.PaymentVolume, amount)
-	}
+	_ = f.AddPaymentChecked(amount)
 }
 
+// AddConsumption records positive consumption and ignores invalid or
+// overflowing updates. Use AddConsumptionChecked when callers need the error.
 func (f *FlowRecord) AddConsumption(amount Amount) {
-	if validFlowAmount(amount) {
-		f.Consumption = Add(f.Consumption, amount)
-	}
+	_ = f.AddConsumptionChecked(amount)
 }
 
+// AddDemandFulfilled records positive fulfilled demand and ignores invalid or
+// overflowing updates. Use AddDemandFulfilledChecked when callers need the error.
 func (f *FlowRecord) AddDemandFulfilled(amount Amount) {
-	if validFlowAmount(amount) {
-		f.DemandFulfilled = Add(f.DemandFulfilled, amount)
+	_ = f.AddDemandFulfilledChecked(amount)
+}
+
+func (f *FlowRecord) AddTradeChecked(amount Amount) error {
+	if !validFlowAmount(amount) {
+		return nil
 	}
+	next, err := CheckedAdd(f.TradeVolume, amount)
+	if err != nil {
+		return err
+	}
+	f.TradeVolume = next
+	return nil
+}
+
+func (f *FlowRecord) AddPaymentChecked(amount Amount) error {
+	if !validFlowAmount(amount) {
+		return nil
+	}
+	next, err := CheckedAdd(f.PaymentVolume, amount)
+	if err != nil {
+		return err
+	}
+	f.PaymentVolume = next
+	return nil
+}
+
+func (f *FlowRecord) AddConsumptionChecked(amount Amount) error {
+	if !validFlowAmount(amount) {
+		return nil
+	}
+	next, err := CheckedAdd(f.Consumption, amount)
+	if err != nil {
+		return err
+	}
+	f.Consumption = next
+	return nil
+}
+
+func (f *FlowRecord) AddDemandFulfilledChecked(amount Amount) error {
+	if !validFlowAmount(amount) {
+		return nil
+	}
+	next, err := CheckedAdd(f.DemandFulfilled, amount)
+	if err != nil {
+		return err
+	}
+	f.DemandFulfilled = next
+	return nil
 }
 
 func QuoteTrade(seller, buyer NodeID, sellUnit, buyUnit UnitID, sellAmount, buyAmount Amount) TradeQuote {
