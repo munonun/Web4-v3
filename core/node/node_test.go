@@ -746,6 +746,53 @@ func TestExecuteSignedTradeWithPeerShadowAllowsOneSidedStore(t *testing.T) {
 	}
 }
 
+func TestExecuteSignedTradeRejectsStaleSignedIntent(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.Store = newFakeStore()
+	buyer.Store = seller.Store
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	seller.NowUnix = func() int64 { return q.Timestamp + MaxSignedIntentAge + 1 }
+	buyer.NowUnix = seller.NowUnix
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected stale signed trade rejection")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("stale signed trade mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
+func TestExecuteSignedTradeFreshIntentStillExecutes(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.Store = newFakeStore()
+	buyer.Store = seller.Store
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	seller.NowUnix = func() int64 { return q.Timestamp + MaxSignedIntentAge }
+	buyer.NowUnix = seller.NowUnix
+	if _, err := ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig); err != nil {
+		t.Fatalf("fresh signed trade rejected: %v", err)
+	}
+}
+
+func TestExecuteSignedTradeWithPeerShadowRejectsStaleSignedIntent(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
+	seller.Store = newFakeStore()
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signQuoteBoth(t, seller, buyer, q)
+
+	seller.NowUnix = func() int64 { return q.Timestamp + MaxSignedIntentAge + 1 }
+	buyer.NowUnix = seller.NowUnix
+	if _, err := ExecuteSignedTradeWithPeerShadow(seller, buyer, q, sellerSig, buyerSig); err == nil {
+		t.Fatal("expected stale peer-shadow signed trade rejection")
+	}
+	if seller.Balance(sellUnit) != model.FromFloat(10) || buyer.Balance(buyUnit) != model.FromFloat(10) {
+		t.Fatalf("stale peer-shadow trade mutated balances seller=%d buyer=%d", seller.Balance(sellUnit), buyer.Balance(buyUnit))
+	}
+}
+
 func TestAuthorizedTradeIDDeterministic(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testSignedTradeNodes(t)
 	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)

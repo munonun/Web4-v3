@@ -27,6 +27,9 @@ func NewIssueTx(issuerPriv crypto.PrivateKey, owner crypto.PublicKey, unitName s
 	if err != nil {
 		return nil, Value{}, err
 	}
+	if isZeroNodeID(ownerID) {
+		return nil, Value{}, fmt.Errorf("owner is required")
+	}
 
 	unit, err := NewUnitID(issuer, unitName)
 	if err != nil {

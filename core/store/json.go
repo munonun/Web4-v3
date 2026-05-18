@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"web4-v3/core/model"
 	"web4-v3/core/node"
@@ -598,20 +599,129 @@ func (s *JSONStore) verifyTransactionManifest(id model.TxID, manifest transactio
 	if len(manifest.Targets) == 0 {
 		return fmt.Errorf("transaction manifest has no targets")
 	}
+	sawTrade := false
 	for _, target := range manifest.Targets {
-		path := filepath.Join(s.root, filepath.FromSlash(target))
+		cleanTarget := filepath.Clean(filepath.FromSlash(target))
+		if filepath.IsAbs(cleanTarget) {
+			return fmt.Errorf("transaction target escapes store root: %s", target)
+		}
+		path := filepath.Join(s.root, cleanTarget)
 		rel, err := filepath.Rel(s.root, path)
 		if err != nil {
 			return err
 		}
-		if rel == "." || rel == ".." || len(rel) >= 3 && rel[:3] == "../" {
+		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("transaction target escapes store root: %s", target)
 		}
 		if !exists(path) {
 			return fmt.Errorf("committed transaction target missing: %s", target)
 		}
+		if err := s.validateTransactionTarget(id, target, path); err != nil {
+			return err
+		}
+		if filepath.ToSlash(filepath.Clean(target)) == filepath.ToSlash(filepath.Join("trades", idHex(id)+".json")) {
+			sawTrade = true
+		}
+	}
+	if !sawTrade {
+		return fmt.Errorf("transaction manifest missing authorized trade target")
 	}
 	return nil
+}
+
+func (s *JSONStore) validateTransactionTarget(id model.TxID, target string, path string) error {
+	parts := strings.Split(filepath.ToSlash(filepath.Clean(target)), "/")
+	if len(parts) != 2 {
+		return fmt.Errorf("unexpected transaction target: %s", target)
+	}
+	switch parts[0] {
+	case "trades":
+		if parts[1] != idHex(id)+".json" {
+			return fmt.Errorf("transaction trade target id mismatch: %s", target)
+		}
+		var tx node.AuthorizedTradeTx
+		if err := readJSONIfExists(path, &tx); err != nil {
+			return fmt.Errorf("authorized trade target invalid: %w", err)
+		}
+		authID, err := node.AuthorizedTradeID(tx)
+		if err != nil {
+			return fmt.Errorf("authorized trade target invalid: %w", err)
+		}
+		if authID != id {
+			return fmt.Errorf("authorized trade target id mismatch")
+		}
+	case "inventory":
+		nodeID, err := nodeIDFromStateFile(parts[1])
+		if err != nil {
+			return err
+		}
+		var dto inventoryDTO
+		if err := readJSONIfExists(path, &dto); err != nil {
+			return fmt.Errorf("inventory target invalid: %w", err)
+		}
+		if err := requireNodeMatch(dto.Node, nodeID); err != nil {
+			return err
+		}
+		for unitString := range dto.Holdings {
+			if _, err := parseUnitID(unitString); err != nil {
+				return fmt.Errorf("inventory target invalid unit id: %w", err)
+			}
+		}
+	case "flow":
+		nodeID, err := nodeIDFromStateFile(parts[1])
+		if err != nil {
+			return err
+		}
+		var dto flowDTO
+		if err := readJSONIfExists(path, &dto); err != nil {
+			return fmt.Errorf("flow target invalid: %w", err)
+		}
+		if err := requireNodeMatch(dto.Node, nodeID); err != nil {
+			return err
+		}
+		for unitString := range dto.Records {
+			if _, err := parseUnitID(unitString); err != nil {
+				return fmt.Errorf("flow target invalid unit id: %w", err)
+			}
+		}
+	case "prices":
+		nodeID, err := nodeIDFromStateFile(parts[1])
+		if err != nil {
+			return err
+		}
+		var dto priceDTO
+		if err := readJSONIfExists(path, &dto); err != nil {
+			return fmt.Errorf("price target invalid: %w", err)
+		}
+		if err := requireNodeMatch(dto.Node, nodeID); err != nil {
+			return err
+		}
+		for unitString := range dto.Prices {
+			if _, err := parseUnitID(unitString); err != nil {
+				return fmt.Errorf("price target invalid unit id: %w", err)
+			}
+		}
+	default:
+		return fmt.Errorf("unexpected transaction target: %s", target)
+	}
+	return nil
+}
+
+func nodeIDFromStateFile(name string) (model.NodeID, error) {
+	var id model.NodeID
+	nodeString := strings.TrimSuffix(name, ".json")
+	if nodeString == name || nodeString == "" {
+		return id, fmt.Errorf("invalid node state target: %s", name)
+	}
+	b, err := hex.DecodeString(nodeString)
+	if err != nil {
+		return id, err
+	}
+	if len(b) != len(id) {
+		return id, fmt.Errorf("invalid node id length")
+	}
+	copy(id[:], b)
+	return id, nil
 }
 
 func readJSONIfExists(path string, out any) error {
@@ -653,10 +763,11 @@ func (s *JSONStore) recoverTransactions() error {
 			return err
 		}
 		if exists(s.committedPath(id)) || (hasManifest && manifest.Phase == "committed") {
-			if hasManifest {
-				if err := s.verifyTransactionManifest(id, manifest); err != nil {
-					return err
-				}
+			if !hasManifest {
+				return fmt.Errorf("committed json transaction for trade %x is missing manifest", id[:])
+			}
+			if err := s.verifyTransactionManifest(id, manifest); err != nil {
+				return err
 			}
 			if err := writeExecutedMarkerExclusive(s.executedPath(id), id); err != nil {
 				return err

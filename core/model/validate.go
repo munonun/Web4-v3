@@ -18,6 +18,9 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 	if !validAmount(tx.Amount) {
 		return fmt.Errorf("amount must be greater than zero")
 	}
+	if isZeroNodeID(tx.Owner) {
+		return fmt.Errorf("owner is required")
+	}
 
 	unit, err := NewUnitID(tx.Issuer.PublicKey(), tx.UnitName)
 	if err != nil {
@@ -47,6 +50,9 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 		return fmt.Errorf("signed issue tx must have one output")
 	}
 	txOutput := tx.Outputs[0]
+	if isZeroNodeID(txOutput.Owner) {
+		return fmt.Errorf("signed output owner is required")
+	}
 	expectedTxOutputID, err := ValueIDFor(txOutput)
 	if err != nil {
 		return fmt.Errorf("signed output: %w", err)
@@ -59,6 +65,9 @@ func ValidateIssueTx(tx *IssueTx, output Value) error {
 	}
 	if output.Amount != tx.Amount || !sameHash(output.Unit, tx.Unit) || output.Owner != tx.Owner || output.Issuer != tx.Issuer || output.ExpiryUnix != tx.ExpiryUnix || output.Depth != 0 {
 		return fmt.Errorf("output does not match issue tx")
+	}
+	if isZeroNodeID(output.Owner) {
+		return fmt.Errorf("output owner is required")
 	}
 
 	expectedValueID, err := ValueIDFor(output)

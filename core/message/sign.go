@@ -65,8 +65,8 @@ func SignEnvelope(
 }
 
 func VerifyEnvelope(env Envelope, payloadBytes []byte, pub crypto.PublicKey) error {
-	if env.Version == 0 {
-		return fmt.Errorf("version must be greater than zero")
+	if env.Version != CurrentVersion {
+		return fmt.Errorf("unsupported message version %d", env.Version)
 	}
 	if !IsValidMessageType(env.Type) {
 		return fmt.Errorf("invalid message type %q", env.Type)

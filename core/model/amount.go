@@ -10,14 +10,30 @@ type Amount int64
 const AmountScale int64 = 1_000_000
 
 func FromFloat(f float64) Amount {
+	amount, err := FromFloatChecked(f)
+	if err != nil {
+		panic(err)
+	}
+	return amount
+}
+
+func FromFloatChecked(f float64) (Amount, error) {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
-		panic("invalid amount")
+		return 0, fmt.Errorf("invalid amount")
+	}
+	if f < 0 {
+		return 0, fmt.Errorf("amount must be non-negative")
 	}
 	scaled := f * float64(AmountScale)
-	if scaled > float64(math.MaxInt64) || scaled < float64(math.MinInt64) {
-		panic("amount overflow")
+	if math.IsNaN(scaled) || math.IsInf(scaled, 0) {
+		return 0, fmt.Errorf("amount overflow")
 	}
-	return Amount(math.Round(scaled))
+	rounded := math.Round(scaled)
+	maxInt64Float := math.Nextafter(float64(math.MaxInt64), 0)
+	if rounded < 0 || rounded > maxInt64Float {
+		return 0, fmt.Errorf("amount overflow")
+	}
+	return Amount(rounded), nil
 }
 
 func ToFloat(a Amount) float64 {

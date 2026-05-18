@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestAmountFixedPointConversion(t *testing.T) {
 	if got := FromFloat(1.0); got != Amount(AmountScale) {
@@ -18,6 +21,41 @@ func TestAmountFixedPointConversion(t *testing.T) {
 	if got := ToFloat(1_250_000); got != 1.25 {
 		t.Fatalf("ToFloat = %f, want 1.25", got)
 	}
+}
+
+func TestFromFloatCheckedRejectsInvalidAndOverflow(t *testing.T) {
+	for _, value := range []float64{
+		math.NaN(),
+		math.Inf(1),
+		math.Inf(-1),
+		-1,
+		float64(math.MaxInt64) / float64(AmountScale),
+		math.MaxFloat64,
+	} {
+		if _, err := FromFloatChecked(value); err == nil {
+			t.Fatalf("FromFloatChecked(%v) succeeded", value)
+		}
+	}
+}
+
+func TestFromFloatMaxBoundaryDoesNotWrapNegative(t *testing.T) {
+	value := math.Nextafter(float64(math.MaxInt64)/float64(AmountScale), 0)
+	amount, err := FromFloatChecked(value)
+	if err != nil {
+		t.Fatalf("max safe boundary rejected: %v", err)
+	}
+	if amount < 0 {
+		t.Fatalf("max boundary wrapped negative: %d", amount)
+	}
+}
+
+func TestFromFloatPanicsPredictablyOnInvalidInput(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected FromFloat to panic on invalid input")
+		}
+	}()
+	_ = FromFloat(math.Inf(1))
 }
 
 func TestAmountArithmeticExactness(t *testing.T) {

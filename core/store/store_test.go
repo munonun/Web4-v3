@@ -168,6 +168,70 @@ func TestJSONStoreRecoveryCompletesMarkerAfterStateTradeCrash(t *testing.T) {
 	}
 }
 
+func TestJSONStoreRecoveryRejectsEmptyCommittedTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		corrupt   func(root string, id model.TxID, seller *node.Node)
+		wantError string
+	}{
+		{
+			name: "empty trade",
+			corrupt: func(root string, id model.TxID, seller *node.Node) {
+				if err := os.WriteFile(tradePath(root, id), nil, 0o600); err != nil {
+					t.Fatalf("empty trade target: %v", err)
+				}
+			},
+		},
+		{
+			name: "empty inventory",
+			corrupt: func(root string, id model.TxID, seller *node.Node) {
+				if err := os.WriteFile(inventoryPath(root, seller.ID), nil, 0o600); err != nil {
+					t.Fatalf("empty inventory target: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, authID, seller := committedRecoveryFixture(t)
+			tc.corrupt(root, authID, seller)
+			if _, err := store.NewJSONStore(root); err == nil {
+				t.Fatal("expected corrupt committed target recovery failure")
+			}
+			if _, err := os.Stat(executedPath(root, authID)); !os.IsNotExist(err) {
+				t.Fatalf("corrupt committed target became executed marker, stat err=%v", err)
+			}
+		})
+	}
+}
+
+func TestJSONStoreRecoveryRejectsCorruptCommittedJSON(t *testing.T) {
+	root, authID, _ := committedRecoveryFixture(t)
+	if err := os.WriteFile(tradePath(root, authID), []byte("{bad"), 0o600); err != nil {
+		t.Fatalf("corrupt trade target: %v", err)
+	}
+	if _, err := store.NewJSONStore(root); err == nil {
+		t.Fatal("expected corrupt committed trade recovery failure")
+	}
+	if _, err := os.Stat(executedPath(root, authID)); !os.IsNotExist(err) {
+		t.Fatalf("corrupt committed trade became executed marker, stat err=%v", err)
+	}
+}
+
+func TestJSONStoreRecoveryRejectsMismatchedCommittedNodeState(t *testing.T) {
+	root, authID, seller := committedRecoveryFixture(t)
+	wrongNode := model.NodeID{9, 9, 9}
+	data := []byte(fmt.Sprintf(`{"node":"%x","holdings":{}}`, wrongNode[:]))
+	if err := os.WriteFile(inventoryPath(root, seller.ID), data, 0o600); err != nil {
+		t.Fatalf("mismatched inventory target: %v", err)
+	}
+	if _, err := store.NewJSONStore(root); err == nil {
+		t.Fatal("expected mismatched committed node state recovery failure")
+	}
+	if _, err := os.Stat(executedPath(root, authID)); !os.IsNotExist(err) {
+		t.Fatalf("mismatched committed state became executed marker, stat err=%v", err)
+	}
+}
+
 func TestJSONStorePersistsAuthorizedTrade(t *testing.T) {
 	s, err := store.NewJSONStore(t.TempDir())
 	if err != nil {
@@ -528,4 +592,35 @@ func writeTxnManifest(t *testing.T, root string, id model.TxID, phase string, ta
 	if err := os.WriteFile(manifestPath(root, id), data, 0o600); err != nil {
 		t.Fatalf("write txn manifest: %v", err)
 	}
+}
+
+func committedRecoveryFixture(t *testing.T) (string, model.TxID, *node.Node) {
+	t.Helper()
+	root := t.TempDir()
+	s, err := store.NewJSONStore(root)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	seller, buyer, sellUnit, buyUnit := storedTradeNodes(t, s)
+	q := seller.QuoteSell(buyer, sellUnit, buyUnit, model.FromFloat(2), 0)
+	sellerSig, buyerSig := signBoth(t, seller, buyer, q)
+	tx, err := node.ExecuteSignedTrade(seller, buyer, q, sellerSig, buyerSig)
+	if err != nil {
+		t.Fatalf("execute signed trade: %v", err)
+	}
+	authID, err := node.AuthorizedTradeID(node.AuthorizedTradeTx{Tx: *tx, SellerAuth: sellerSig, BuyerAuth: buyerSig})
+	if err != nil {
+		t.Fatalf("auth id: %v", err)
+	}
+	if err := os.Remove(executedPath(root, authID)); err != nil {
+		t.Fatalf("remove executed marker: %v", err)
+	}
+	writeTxnManifest(t, root, authID, "committed", executionTargets(root, authID, seller.ID, buyer.ID))
+	if err := os.WriteFile(reservationPath(root, authID), []byte("executing"), 0o600); err != nil {
+		t.Fatalf("write executing record: %v", err)
+	}
+	if err := os.WriteFile(committedPath(root, authID), []byte(fmt.Sprintf(`{"id":"%x","state":"committed"}`, authID[:])), 0o600); err != nil {
+		t.Fatalf("write committed record: %v", err)
+	}
+	return root, authID, seller
 }

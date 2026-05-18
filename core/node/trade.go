@@ -11,6 +11,11 @@ import (
 
 var signedTradeExecutionMu sync.Mutex
 
+// MaxSignedIntentAge is the maximum age, in Unix seconds, accepted for direct
+// node-level signed trade execution. Handler/session expiry checks are a
+// protocol boundary; this is the core execution boundary.
+const MaxSignedIntentAge int64 = 24 * 60 * 60
+
 func ExecuteTrade(seller *Node, buyer *Node, q Quote) (*model.TradeTx, error) {
 	if seller == nil || buyer == nil {
 		return nil, fmt.Errorf("seller and buyer are required")
@@ -130,6 +135,9 @@ func executeSignedTrade(
 	if !economicTermsMatch(sellerSig.Intent, buyerSig.Intent) {
 		return nil, fmt.Errorf("authorizations do not sign the same terms")
 	}
+	if err := validateSignedIntentFreshness(seller, buyer, sellerSig, buyerSig); err != nil {
+		return nil, err
+	}
 
 	if err := requireDurableReplayGuard(seller, buyer, allowPeerShadow); err != nil {
 		return nil, err
@@ -185,6 +193,21 @@ func executeSignedTrade(
 	commitPreparedState(seller, nextSeller)
 	commitPreparedState(buyer, nextBuyer)
 	return tx, nil
+}
+
+func validateSignedIntentFreshness(seller *Node, buyer *Node, sellerSig SignedTradeIntent, buyerSig SignedTradeIntent) error {
+	if sellerSig.Intent.Timestamp != buyerSig.Intent.Timestamp {
+		return fmt.Errorf("authorization timestamps do not match")
+	}
+	timestamp := sellerSig.Intent.Timestamp
+	now := maxInt64(seller.NowUnix(), buyer.NowUnix())
+	if now < timestamp {
+		return fmt.Errorf("authorization timestamp is in the future")
+	}
+	if now-timestamp > MaxSignedIntentAge {
+		return fmt.Errorf("signed trade authorization expired")
+	}
+	return nil
 }
 
 func buildTradeTx(seller model.NodeID, buyer model.NodeID, q Quote, now int64) (*model.TradeTx, error) {

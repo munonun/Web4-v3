@@ -60,6 +60,57 @@ func TestIssueTxValidates(t *testing.T) {
 	}
 }
 
+func TestNewIssueTxRejectsZeroOwner(t *testing.T) {
+	_, issuerPriv, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("generate issuer: %v", err)
+	}
+	zeroOwner := crypto.PublicKey(make([]byte, 32))
+	if _, _, err := NewIssueTx(issuerPriv, zeroOwner, "credits", 100, 0); err == nil {
+		t.Fatal("expected zero owner rejection")
+	}
+}
+
+func TestValidateIssueTxRejectsZeroOwner(t *testing.T) {
+	issuerPub, issuerPriv, err := crypto.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("generate issuer: %v", err)
+	}
+	issuerID, err := NodeIDFromPublicKey(issuerPub)
+	if err != nil {
+		t.Fatalf("issuer id: %v", err)
+	}
+	unit, err := NewUnitID(issuerPub, "credits")
+	if err != nil {
+		t.Fatalf("unit id: %v", err)
+	}
+	output := Value{Amount: 100, Unit: unit, Owner: NodeID{}, Issuer: issuerID, Depth: 0}
+	output.ID = mustValueID(t, output)
+	tx := IssueTx{
+		UnitName: "credits",
+		Unit:     unit,
+		Amount:   100,
+		Issuer:   issuerID,
+		Owner:    NodeID{},
+		Outputs:  []Value{output},
+	}
+	tx.ID, err = IssueTxID(tx)
+	if err != nil {
+		t.Fatalf("tx id: %v", err)
+	}
+	preimage, err := issuePreimage(tx)
+	if err != nil {
+		t.Fatalf("issue preimage: %v", err)
+	}
+	tx.Signature, err = crypto.Sign(issuerPriv, preimage)
+	if err != nil {
+		t.Fatalf("sign issue: %v", err)
+	}
+	if err := ValidateIssueTx(&tx, output); err == nil {
+		t.Fatal("expected zero owner validation rejection")
+	}
+}
+
 func TestIssueOutputCreatedAtBoundToSignedOutput(t *testing.T) {
 	tx, output := mustIssueWithCreatedAt(t, 100, 123)
 

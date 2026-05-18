@@ -89,6 +89,42 @@ func TestSignAndVerifyEnvelope(t *testing.T) {
 	}
 }
 
+func TestVerifyEnvelopeRejectsUnsupportedVersion(t *testing.T) {
+	pub, priv, _ := testKey(t)
+	env, payloadBytes, err := SignEnvelope(priv, TypePing, PingPayload{TimeUnix: 10}, 100, testNonce(7))
+	if err != nil {
+		t.Fatalf("sign envelope: %v", err)
+	}
+	if err := VerifyEnvelope(env, payloadBytes, pub); err != nil {
+		t.Fatalf("current version rejected: %v", err)
+	}
+
+	versionZero := env
+	versionZero.Version = 0
+	if err := VerifyEnvelope(versionZero, payloadBytes, pub); err == nil {
+		t.Fatal("version 0 verified")
+	}
+
+	versionTwo := env
+	versionTwo.Version = CurrentVersion + 1
+	versionTwo.MessageID, err = MessageID(versionTwo.Version, versionTwo.Type, versionTwo.Sender, versionTwo.Timestamp, versionTwo.Nonce, versionTwo.PayloadHash)
+	if err != nil {
+		t.Fatalf("message id v2: %v", err)
+	}
+	versionTwo.Signature = nil
+	preimage, err := EnvelopePreimage(versionTwo)
+	if err != nil {
+		t.Fatalf("preimage v2: %v", err)
+	}
+	versionTwo.Signature, err = crypto.Sign(priv, preimage)
+	if err != nil {
+		t.Fatalf("sign v2: %v", err)
+	}
+	if err := VerifyEnvelope(versionTwo, payloadBytes, pub); err == nil {
+		t.Fatal("unsupported version 2 verified")
+	}
+}
+
 func TestVerifyEnvelopeRejectsTampering(t *testing.T) {
 	pub, priv, _ := testKey(t)
 	env, payloadBytes, err := SignEnvelope(priv, TypePing, PingPayload{TimeUnix: 10}, 100, testNonce(8))
