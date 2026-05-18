@@ -155,6 +155,30 @@ func intentMatchesQuote(intent node.TradeIntent, quote message.QuoteResponsePayl
 		intent.Timestamp == quote.ExpiryUnix
 }
 
+func isExpired(expiryUnix, nowUnix int64) bool {
+	return expiryUnix > 0 && nowUnix > expiryUnix
+}
+
+func validateQuoteFreshness(req *message.QuoteRequestPayload, q message.QuoteResponsePayload, nowUnix int64) error {
+	if req != nil {
+		if isExpired(req.ExpiryUnix, nowUnix) {
+			return fmt.Errorf("quote request is expired")
+		}
+		if req.ExpiryUnix > 0 {
+			if q.ExpiryUnix == 0 {
+				return fmt.Errorf("quote response removes request expiry")
+			}
+			if q.ExpiryUnix > req.ExpiryUnix {
+				return fmt.Errorf("quote response extends request expiry")
+			}
+		}
+	}
+	if isExpired(q.ExpiryUnix, nowUnix) {
+		return fmt.Errorf("quote response is expired")
+	}
+	return nil
+}
+
 func validateQuoteMatchesRequest(q message.QuoteResponsePayload, req message.QuoteRequestPayload, nowUnix int64) error {
 	if q.RequestID != req.RequestID ||
 		q.Seller != req.Seller ||
@@ -164,19 +188,8 @@ func validateQuoteMatchesRequest(q message.QuoteResponsePayload, req message.Quo
 		q.SellAmount != req.SellAmount {
 		return fmt.Errorf("quote response does not match request")
 	}
-	if req.ExpiryUnix > 0 {
-		if nowUnix > req.ExpiryUnix {
-			return fmt.Errorf("quote request is expired")
-		}
-		if q.ExpiryUnix == 0 {
-			return fmt.Errorf("quote response removes request expiry")
-		}
-		if q.ExpiryUnix > req.ExpiryUnix {
-			return fmt.Errorf("quote response extends request expiry")
-		}
-	}
-	if q.ExpiryUnix > 0 && nowUnix > q.ExpiryUnix {
-		return fmt.Errorf("quote response is expired")
+	if err := validateQuoteFreshness(&req, q, nowUnix); err != nil {
+		return err
 	}
 	if req.SpreadLimit < 0 {
 		return fmt.Errorf("quote request spread limit is invalid")

@@ -115,6 +115,10 @@ func (h *Handler) handleQuoteRequest(ref model.TxID, payload message.QuoteReques
 	if payload.Seller != h.Node.ID || payload.Buyer != h.Session.PeerID {
 		return h.reject(ref, "INVALID_ROLE", "quote request roles do not match session")
 	}
+	if isExpired(payload.ExpiryUnix, h.Node.NowUnix()) {
+		h.Session.ClearRequest(payload.RequestID)
+		return h.reject(ref, "QUOTE_EXPIRED", "quote request is expired")
+	}
 	h.Session.PendingRequests[payload.RequestID] = payload
 
 	peer := h.peerShadow(payload.Buyer, payload.BuyUnit, payload.SellUnit, payload.SellAmount)
@@ -138,7 +142,11 @@ func (h *Handler) handleQuoteResponse(ref model.TxID, payload message.QuoteRespo
 	if !ok {
 		return h.reject(ref, "UNEXPECTED_QUOTE_RESPONSE", "quote response does not match a pending request")
 	}
-	if err := validateQuoteMatchesRequest(payload, request, h.Node.NowUnix()); err != nil {
+	now := h.Node.NowUnix()
+	if err := validateQuoteMatchesRequest(payload, request, now); err != nil {
+		if freshnessErr := validateQuoteFreshness(&request, payload, now); freshnessErr != nil {
+			h.Session.ClearRequest(payload.RequestID)
+		}
 		return h.reject(ref, "QUOTE_MISMATCH", err.Error())
 	}
 	expectedQuoteID, err := quoteID(payload)
@@ -168,6 +176,10 @@ func (h *Handler) handleSignedIntent(ref model.TxID, payload message.SignedInten
 	quote, ok := h.Session.PendingQuotes[payload.QuoteID]
 	if !ok {
 		return h.reject(ref, "UNEXPECTED_SIGNED_INTENT", "signed intent does not match a pending quote")
+	}
+	if err := h.validatePendingQuoteFreshness(quote); err != nil {
+		h.Session.ClearNegotiation(payload.QuoteID, quote, model.TxID{})
+		return h.reject(ref, "QUOTE_EXPIRED", err.Error())
 	}
 	if !h.sessionOwnsParties(quote.Seller, quote.Buyer) {
 		return h.reject(ref, "INVALID_ROLE", "quote roles do not match session")
@@ -327,6 +339,10 @@ func (h *Handler) authorizedNegotiation(payload message.AuthorizedTradePayload) 
 		if !intentMatchesQuote(auth.SellerAuth.Intent, quote) || !intentMatchesQuote(auth.BuyerAuth.Intent, quote) {
 			continue
 		}
+		if err := h.validatePendingQuoteFreshness(quote); err != nil {
+			h.Session.ClearNegotiation(quoteID, quote, payload.AuthorizedTradeID)
+			return model.TxID{}, message.QuoteResponsePayload{}, fmt.Errorf("%w: %v", ErrUnexpectedMessage, err)
+		}
 		if auth.SellerAuth.Intent.Party != quote.Seller || auth.BuyerAuth.Intent.Party != quote.Buyer {
 			return model.TxID{}, message.QuoteResponsePayload{}, fmt.Errorf("%w: authorization party mismatch", ErrInvalidPayload)
 		}
@@ -374,8 +390,16 @@ func (h *Handler) bindAuthorizedIntents(quoteID model.TxID, auth node.Authorized
 }
 
 func (h *Handler) clearNegotiation(quoteID model.TxID, quote message.QuoteResponsePayload, authID model.TxID) {
-	delete(h.Session.PendingQuotes, quoteID)
-	delete(h.Session.PendingIntents, quoteID)
-	delete(h.Session.PendingTrades, authID)
-	delete(h.Session.PendingRequests, quote.RequestID)
+	h.Session.ClearNegotiation(quoteID, quote, authID)
+}
+
+func (h *Handler) validatePendingQuoteFreshness(quote message.QuoteResponsePayload) error {
+	if h == nil || h.Node == nil || h.Session == nil {
+		return fmt.Errorf("%w: handler is not initialized", ErrInvalidState)
+	}
+	now := h.Node.NowUnix()
+	if request, ok := h.Session.PendingRequests[quote.RequestID]; ok {
+		return validateQuoteFreshness(&request, quote, now)
+	}
+	return validateQuoteFreshness(nil, quote, now)
 }

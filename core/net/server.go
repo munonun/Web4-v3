@@ -17,9 +17,10 @@ type Server struct {
 
 	PeerPublicKey crypto.PublicKey
 
-	ReadTimeout  time.Duration
-	WriteTimeout time.Duration
-	MaxMessages  int
+	ReadTimeout    time.Duration
+	WriteTimeout   time.Duration
+	MaxMessages    int
+	MaxConnections int
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {
@@ -57,6 +58,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}()
 	defer close(done)
 
+	maxConnections := s.MaxConnections
+	if maxConnections <= 0 {
+		maxConnections = DefaultMaxConnections
+	}
+	slots := make(chan struct{}, maxConnections)
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -65,21 +72,25 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			}
 			return err
 		}
-		runtime := &PeerRuntime{
-			Node:          s.Node,
-			PeerPublicKey: append(crypto.PublicKey(nil), s.PeerPublicKey...),
-			Conn:          conn,
-			ReadTimeout:   s.ReadTimeout,
-			WriteTimeout:  s.WriteTimeout,
-			MaxMessages:   s.MaxMessages,
-		}
-		err = runtime.Serve(ctx)
-		_ = conn.Close()
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return ctxErr
-			}
+		select {
+		case slots <- struct{}{}:
+		default:
+			_ = conn.Close()
 			continue
 		}
+
+		go func(conn stdnet.Conn) {
+			defer func() { <-slots }()
+			runtime := &PeerRuntime{
+				Node:          s.Node,
+				PeerPublicKey: append(crypto.PublicKey(nil), s.PeerPublicKey...),
+				Conn:          conn,
+				ReadTimeout:   s.ReadTimeout,
+				WriteTimeout:  s.WriteTimeout,
+				MaxMessages:   s.MaxMessages,
+			}
+			_ = runtime.Serve(ctx)
+			_ = conn.Close()
+		}(conn)
 	}
 }

@@ -282,6 +282,104 @@ func TestServerIdlePeerTimesOutAndServerContinues(t *testing.T) {
 	}
 }
 
+func TestServerIdlePeerDoesNotBlockSecondValidPeer(t *testing.T) {
+	probe, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("localhost sockets are not permitted in this sandbox: %v", err)
+		}
+		t.Fatalf("listen probe: %v", err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	server := &Server{
+		Addr:           addr,
+		Node:           testNode(t, 100),
+		ReadTimeout:    3 * time.Second,
+		WriteTimeout:   time.Second,
+		MaxConnections: 2,
+	}
+	client := testNode(t, 200)
+	server.PeerPublicKey = client.PublicKey
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe(ctx)
+	}()
+
+	idleConn := dialTCP(t, addr)
+	defer idleConn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	validConn := dialTCP(t, addr)
+	defer validConn.Close()
+	if err := validConn.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set valid connection deadline: %v", err)
+	}
+	ping := signedMessage(t, client, message.TypePing, message.PingPayload{TimeUnix: 200}, testNonce(14))
+	if err := transport.WriteFrame(validConn, ping); err != nil {
+		t.Fatalf("write ping while idle peer connected: %v", err)
+	}
+	resp, err := transport.ReadFrame(validConn)
+	if err != nil {
+		t.Fatalf("read pong while idle peer connected: %v", err)
+	}
+	if resp.Envelope.Type != message.TypePong {
+		t.Fatalf("response type %s, want PONG", resp.Envelope.Type)
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("server error %v, want context.Canceled", err)
+	}
+}
+
+func TestServerMaxConnectionsLimitClosesExcessConnection(t *testing.T) {
+	probe, err := stdnet.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("localhost sockets are not permitted in this sandbox: %v", err)
+		}
+		t.Fatalf("listen probe: %v", err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	server := &Server{
+		Addr:           addr,
+		Node:           testNode(t, 100),
+		ReadTimeout:    time.Second,
+		WriteTimeout:   time.Second,
+		MaxConnections: 1,
+	}
+	client := testNode(t, 200)
+	server.PeerPublicKey = client.PublicKey
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ListenAndServe(ctx)
+	}()
+
+	idleConn := dialTCP(t, addr)
+	defer idleConn.Close()
+	time.Sleep(20 * time.Millisecond)
+
+	excessConn := dialTCP(t, addr)
+	defer excessConn.Close()
+	if err := excessConn.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+		t.Fatalf("set excess connection deadline: %v", err)
+	}
+	if _, err := transport.ReadFrame(excessConn); err == nil {
+		t.Fatal("excess connection remained open")
+	}
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("server error %v, want context.Canceled", err)
+	}
+}
+
 func TestServerMalformedFrameClosesOnlyConnection(t *testing.T) {
 	probe, err := stdnet.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

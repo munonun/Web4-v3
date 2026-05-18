@@ -243,6 +243,139 @@ func TestQuoteResponseConstraintViolationsRejected(t *testing.T) {
 	}
 }
 
+func TestExpiredPendingRequestRejectsQuoteResponseAndDoesNotSignIntent(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+	now := int64(100)
+	seller.NowUnix = func() int64 { return now }
+	buyer.NowUnix = func() int64 { return now }
+	h := testHandler(t, buyer, seller)
+	req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+	req.ExpiryUnix = 100
+	q := executableQuoteResponse(t, seller, buyer, sellUnit, buyUnit, req.RequestID)
+	q.ExpiryUnix = 100
+	setQuoteID(t, &q)
+	h.Session.PendingRequests[req.RequestID] = req
+
+	now = 101
+	msg := signedMessage(t, seller.PrivateKey, message.TypeQuoteResponse, q, 101, testNonce(74))
+	resp, err := h.HandleMessage(msg, seller.PublicKey)
+	if err != nil {
+		t.Fatalf("handle expired quote response: %v", err)
+	}
+	if resp == nil || resp.Envelope.Type != message.TypeReject {
+		t.Fatalf("response %+v, want reject", resp)
+	}
+	if _, ok := h.Session.PendingRequests[req.RequestID]; ok {
+		t.Fatal("expired pending request was not cleared")
+	}
+	if _, ok := h.Session.PendingQuotes[q.QuoteID]; ok {
+		t.Fatal("expired quote response was stored")
+	}
+	if _, ok := h.Session.PendingIntents[q.QuoteID]; ok {
+		t.Fatal("expired quote response produced signed intent state")
+	}
+}
+
+func TestExpiredPendingQuoteRejectsSignedIntentAndClearsState(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+	now := int64(100)
+	seller.NowUnix = func() int64 { return now }
+	buyer.NowUnix = func() int64 { return now }
+	h := testHandler(t, seller, buyer)
+	req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+	req.ExpiryUnix = 100
+	q := executableQuoteResponse(t, seller, buyer, sellUnit, buyUnit, req.RequestID)
+	q.ExpiryUnix = 100
+	setQuoteID(t, &q)
+	h.Session.PendingRequests[req.RequestID] = req
+	h.Session.PendingQuotes[q.QuoteID] = q
+	intent, err := buyer.SignQuote(quoteFromResponse(q))
+	if err != nil {
+		t.Fatalf("buyer sign quote: %v", err)
+	}
+
+	now = 101
+	msg := signedMessage(t, buyer.PrivateKey, message.TypeSignedIntent, message.SignedIntentPayload{QuoteID: q.QuoteID, Intent: intent}, 101, testNonce(75))
+	resp, err := h.HandleMessage(msg, buyer.PublicKey)
+	if err != nil {
+		t.Fatalf("handle expired signed intent: %v", err)
+	}
+	if resp == nil || resp.Envelope.Type != message.TypeReject {
+		t.Fatalf("response %+v, want reject", resp)
+	}
+	assertNegotiationCleared(t, h.Session, req.RequestID, q.QuoteID)
+}
+
+func TestExpiredPendingQuoteRejectsAuthorizedTradeExecutionAndClearsState(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+	now := int64(100)
+	seller.NowUnix = func() int64 { return now }
+	buyer.NowUnix = func() int64 { return now }
+	h := testHandler(t, seller, buyer)
+	req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+	req.ExpiryUnix = 100
+	q, authPayload := authorizedTradePayloadForParties(t, seller, buyer, sellUnit, buyUnit)
+	q.RequestID = req.RequestID
+	q.ExpiryUnix = 100
+	setQuoteID(t, &q)
+	quote := quoteFromResponse(q)
+	sellerSig, err := seller.SignQuote(quote)
+	if err != nil {
+		t.Fatalf("seller sign quote: %v", err)
+	}
+	buyerSig, err := buyer.SignQuote(quote)
+	if err != nil {
+		t.Fatalf("buyer sign quote: %v", err)
+	}
+	auth, authID, err := buildAuthorizedTrade(quote, sellerSig, buyerSig)
+	if err != nil {
+		t.Fatalf("build authorized trade: %v", err)
+	}
+	authPayload = message.AuthorizedTradePayload{AuthorizedTrade: auth, AuthorizedTradeID: authID}
+	h.Session.PendingRequests[req.RequestID] = req
+	h.Session.PendingQuotes[q.QuoteID] = q
+	h.Session.PendingIntents[q.QuoteID] = []node.SignedTradeIntent{sellerSig, buyerSig}
+	h.Session.PendingTrades[authID] = auth
+	beforeSeller := seller.Balance(sellUnit)
+
+	now = 101
+	msg := signedMessage(t, buyer.PrivateKey, message.TypeAuthorizedTrade, authPayload, 101, testNonce(76))
+	resp, err := h.HandleMessage(msg, buyer.PublicKey)
+	if !errors.Is(err, ErrUnexpectedMessage) {
+		t.Fatalf("handle expired authorized trade error %v, want ErrUnexpectedMessage", err)
+	}
+	if resp != nil {
+		t.Fatalf("response %+v, want nil", resp)
+	}
+	if seller.Balance(sellUnit) != beforeSeller {
+		t.Fatal("expired authorized trade mutated inventory")
+	}
+	assertNegotiationCleared(t, h.Session, req.RequestID, q.QuoteID)
+	if _, ok := h.Session.PendingTrades[authID]; ok {
+		t.Fatal("expired authorized trade left pending trade")
+	}
+}
+
+func TestZeroExpiryQuoteRequestAllowedAndResponseUsesCurrentTimestamp(t *testing.T) {
+	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
+	h := testHandler(t, seller, buyer)
+	req := quoteRequest(seller, buyer, sellUnit, buyUnit)
+	req.ExpiryUnix = 0
+	msg := signedMessage(t, buyer.PrivateKey, message.TypeQuoteRequest, req, 10, testNonce(77))
+
+	resp, err := h.HandleMessage(msg, buyer.PublicKey)
+	if err != nil {
+		t.Fatalf("handle zero-expiry quote request: %v", err)
+	}
+	if resp == nil || resp.Envelope.Type != message.TypeQuoteResponse {
+		t.Fatalf("response %+v, want quote response", resp)
+	}
+	payload := decodePayload[message.QuoteResponsePayload](t, message.TypeQuoteResponse, resp.PayloadBytes)
+	if payload.ExpiryUnix != seller.NowUnix() {
+		t.Fatalf("quote response expiry %d, want current timestamp %d", payload.ExpiryUnix, seller.NowUnix())
+	}
+}
+
 func TestManuallyConstructedSessionInitializesMaps(t *testing.T) {
 	seller, buyer, sellUnit, buyUnit := testTradeNodes(t)
 	s := &Session{LocalID: seller.ID, PeerID: buyer.ID}
@@ -583,6 +716,19 @@ func decodePayload[T any](t *testing.T, typ message.MessageType, data []byte) T 
 		t.Fatalf("payload type %T", payload)
 	}
 	return typed
+}
+
+func assertNegotiationCleared(t *testing.T, s *Session, requestID model.TxID, quoteID model.TxID) {
+	t.Helper()
+	if _, ok := s.PendingRequests[requestID]; ok {
+		t.Fatal("pending request was not cleared")
+	}
+	if _, ok := s.PendingQuotes[quoteID]; ok {
+		t.Fatal("pending quote was not cleared")
+	}
+	if _, ok := s.PendingIntents[quoteID]; ok {
+		t.Fatal("pending intents were not cleared")
+	}
 }
 
 func quoteRequest(seller *node.Node, buyer *node.Node, sellUnit model.UnitID, buyUnit model.UnitID) message.QuoteRequestPayload {

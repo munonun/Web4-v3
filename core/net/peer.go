@@ -127,13 +127,13 @@ func (p *PeerRuntime) init() error {
 		}
 		p.Handler = h
 	}
-	if p.ReadTimeout == 0 {
+	if p.ReadTimeout <= 0 {
 		p.ReadTimeout = DefaultReadTimeout
 	}
-	if p.WriteTimeout == 0 {
+	if p.WriteTimeout <= 0 {
 		p.WriteTimeout = DefaultWriteTimeout
 	}
-	if p.MaxMessages == 0 {
+	if p.MaxMessages <= 0 {
 		p.MaxMessages = DefaultMaxMessages
 	}
 	return nil
